@@ -1,0 +1,21 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    image: procure-flow:local
+    ports:
+      - "8080:8080"
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: info
+      HTTP_ADDR: ":8080"
+      CORS_ALLOWED_ORIGINS: ""
+      # Local compose keeps the interactive reference enabled for testing.
+      DOCS_ENABLED: "true"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

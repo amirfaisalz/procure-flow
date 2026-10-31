@@ -1,0 +1,28 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+*.prof
+
+# Local configuration
+.env
+.env.local
+configs/*.env
+!configs/config.example.env
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Logs
+*.log

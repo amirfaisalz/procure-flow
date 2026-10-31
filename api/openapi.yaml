@@ -1,0 +1,372 @@
+openapi: 3.1.0
+info:
+  title: procure-flow API
+  version: 1.0.0
+  description: |
+    Procurement workflow API. Success responses use `{"data": ..., "meta": ...}`.
+    Errors use RFC 9457 `application/problem+json`.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: Health
+  - name: Procurements
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      operationId: getLiveness
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Liveness"
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      operationId: getReadiness
+      responses:
+        "200":
+          description: All dependencies are usable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Readiness"
+        "503":
+          description: One or more dependencies are unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Readiness"
+  /api/v1/procurements:
+    get:
+      tags: [Procurements]
+      summary: List procurements
+      operationId: listProcurements
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/Status"
+        - name: q
+          in: query
+          description: Case-insensitive search across number, title, description, department, and requester.
+          schema: { type: string }
+      responses:
+        "200":
+          description: A page of procurements
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Procurement"
+                  meta:
+                    $ref: "#/components/schemas/PageMeta"
+        "400":
+          $ref: "#/components/responses/Problem"
+    post:
+      tags: [Procurements]
+      summary: Create a draft procurement
+      operationId: createProcurement
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProcurementRequest"
+      responses:
+        "201":
+          description: Created
+          headers:
+            Location:
+              schema: { type: string }
+              description: URL of the created procurement
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Procurement"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "413":
+          $ref: "#/components/responses/Problem"
+        "415":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+  /api/v1/procurements/{id}:
+    get:
+      tags: [Procurements]
+      summary: Get a procurement
+      operationId: getProcurement
+      parameters:
+        - $ref: "#/components/parameters/ProcurementID"
+      responses:
+        "200":
+          description: Procurement
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Procurement"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /api/v1/procurements/{id}/submit:
+    post:
+      tags: [Procurements]
+      summary: Submit a draft procurement
+      operationId: submitProcurement
+      parameters:
+        - $ref: "#/components/parameters/ProcurementID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Procurement"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /api/v1/procurements/{id}/approve:
+    post:
+      tags: [Procurements]
+      summary: Approve a submitted procurement
+      operationId: approveProcurement
+      parameters:
+        - $ref: "#/components/parameters/ProcurementID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Procurement"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /api/v1/procurements/{id}/reject:
+    post:
+      tags: [Procurements]
+      summary: Reject a submitted procurement
+      operationId: rejectProcurement
+      parameters:
+        - $ref: "#/components/parameters/ProcurementID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  minLength: 3
+                  maxLength: 500
+      responses:
+        "200":
+          $ref: "#/components/responses/Procurement"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+  /api/v1/procurements/{id}/cancel:
+    post:
+      tags: [Procurements]
+      summary: Cancel a draft or submitted procurement
+      operationId: cancelProcurement
+      parameters:
+        - $ref: "#/components/parameters/ProcurementID"
+      responses:
+        "200":
+          $ref: "#/components/responses/Procurement"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+components:
+  parameters:
+    ProcurementID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^prc_[a-f0-9]{32}$"
+  responses:
+    Procurement:
+      description: Updated procurement
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties:
+              data:
+                $ref: "#/components/schemas/Procurement"
+    Problem:
+      description: RFC 9457 problem document
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    Status:
+      type: string
+      enum: [draft, submitted, approved, rejected, cancelled]
+    CreateProcurementRequest:
+      type: object
+      additionalProperties: false
+      required: [title, department, requester, amount, currency]
+      properties:
+        title:
+          type: string
+          minLength: 3
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        department:
+          type: string
+          minLength: 1
+          maxLength: 100
+        requester:
+          type: string
+          minLength: 1
+          maxLength: 100
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Amount in the minor unit of the currency.
+        currency:
+          type: string
+          pattern: "^[A-Za-z]{3}$"
+          description: ISO 4217 code.
+    Procurement:
+      type: object
+      required:
+        [id, number, title, department, requester, amount, currency, status, created_at, updated_at, version]
+      properties:
+        id:
+          type: string
+          example: prc_4655b358bf93a50be264cace48feefeb
+        number:
+          type: string
+          example: PR-202610-BD08EF2B
+        title:
+          type: string
+        description:
+          type: string
+        department:
+          type: string
+        requester:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        currency:
+          type: string
+          example: IDR
+        status:
+          $ref: "#/components/schemas/Status"
+        rejection_reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+    PageMeta:
+      type: object
+      required: [page, page_size, total, total_pages]
+      properties:
+        page:
+          type: integer
+        page_size:
+          type: integer
+        total:
+          type: integer
+        total_pages:
+          type: integer
+    Liveness:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        version:
+          type: string
+    Readiness:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, error]
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          example: about:blank
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        request_id:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: string

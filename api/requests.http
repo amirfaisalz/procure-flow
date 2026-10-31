@@ -1,0 +1,90 @@
+# procure-flow API requests
+#
+# Works with the VS Code "REST Client" extension and the JetBrains HTTP Client.
+# JetBrains note: replace `{{create.response.body.$.data.id}}` with the ID from
+# the create response (JetBrains uses response handler scripts instead).
+#
+# Interactive alternative: open http://localhost:8080/docs after `make run`.
+# Scalar includes an in-browser request client backed by the same contract.
+
+@baseUrl = http://localhost:8080
+@contentType = application/json
+
+### Liveness
+GET {{baseUrl}}/healthz
+
+### Readiness
+GET {{baseUrl}}/readyz
+
+### OpenAPI document
+GET {{baseUrl}}/openapi.yaml
+
+### Create procurement
+# @name create
+POST {{baseUrl}}/api/v1/procurements
+Content-Type: {{contentType}}
+
+{
+  "title": "Laptop procurement for engineering",
+  "description": "20 units of development laptops",
+  "department": "Engineering",
+  "requester": "Amir",
+  "amount": 250000000,
+  "currency": "IDR"
+}
+
+### List procurements (defaults)
+GET {{baseUrl}}/api/v1/procurements
+
+### List with filter and search
+GET {{baseUrl}}/api/v1/procurements?status=submitted&q=laptop&page=1&page_size=10
+
+### Get procurement by ID
+GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}
+
+### Submit procurement
+POST {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/submit
+
+### Approve procurement
+POST {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/approve
+
+### Reject procurement
+POST {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/reject
+Content-Type: {{contentType}}
+
+{
+  "reason": "budget exceeded"
+}
+
+### Cancel procurement
+POST {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/cancel
+
+### Error: validation (422)
+POST {{baseUrl}}/api/v1/procurements
+Content-Type: {{contentType}}
+
+{
+  "title": "",
+  "department": "",
+  "requester": "",
+  "amount": 0,
+  "currency": "ID"
+}
+
+### Error: invalid JSON (400)
+POST {{baseUrl}}/api/v1/procurements
+Content-Type: {{contentType}}
+
+{"title":
+
+### Error: wrong content type (415)
+POST {{baseUrl}}/api/v1/procurements
+Content-Type: text/plain
+
+{"title": "Laptop procurement"}
+
+### Error: not found (404)
+GET {{baseUrl}}/api/v1/procurements/prc_missing
+
+### Error: method not allowed (405)
+DELETE {{baseUrl}}/api/v1/procurements
