@@ -31,6 +31,18 @@ type Config struct {
 	HTTP     HTTP
 	CORS     CORS
 	Docs     Docs
+	Database Database
+}
+
+// Database controls the optional PostgreSQL persistence adapter. An empty URL
+// selects the in-memory repository (development and tests only).
+type Database struct {
+	URL             string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+	AutoMigrate     bool
 }
 
 // Docs controls the interactive API reference endpoints.
@@ -91,12 +103,18 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	databaseConfig, err := loadDatabase(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Env:      env,
 		LogLevel: level,
 		HTTP:     httpConfig,
 		CORS:     corsConfig,
 		Docs:     docsConfig,
+		Database: databaseConfig,
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -107,6 +125,9 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 func (c Config) validate() error {
 	if c.HTTP.RequestTimeout > c.HTTP.WriteTimeout {
 		return fmt.Errorf("HTTP_REQUEST_TIMEOUT: must be less than or equal to HTTP_WRITE_TIMEOUT")
+	}
+	if c.Env.IsProduction() && c.Database.URL == "" {
+		return fmt.Errorf("DATABASE_URL: required in production (the in-memory repository is not durable)")
 	}
 	return nil
 }
@@ -214,6 +235,53 @@ func loadCORS(raw string) (CORS, error) {
 	return CORS{AllowedOrigins: origins}, nil
 }
 
+func loadDatabase(getenv func(string) string) (Database, error) {
+	db := Database{
+		URL:             strings.TrimSpace(getenv("DATABASE_URL")),
+		MaxOpenConns:    25,
+		MaxIdleConns:    25,
+		ConnMaxLifetime: 30 * time.Minute,
+		ConnMaxIdleTime: 5 * time.Minute,
+		AutoMigrate:     true,
+	}
+
+	var err error
+	if db.MaxOpenConns, err = intEnv(getenv, "DB_MAX_OPEN_CONNS", db.MaxOpenConns); err != nil {
+		return Database{}, err
+	}
+	if db.MaxIdleConns, err = intEnv(getenv, "DB_MAX_IDLE_CONNS", db.MaxIdleConns); err != nil {
+		return Database{}, err
+	}
+	if db.ConnMaxLifetime, err = durationEnv(getenv, "DB_CONN_MAX_LIFETIME", db.ConnMaxLifetime); err != nil {
+		return Database{}, err
+	}
+	if db.ConnMaxIdleTime, err = durationEnv(getenv, "DB_CONN_MAX_IDLE_TIME", db.ConnMaxIdleTime); err != nil {
+		return Database{}, err
+	}
+	if db.AutoMigrate, err = boolEnv(getenv, "DB_AUTO_MIGRATE", db.AutoMigrate); err != nil {
+		return Database{}, err
+	}
+
+	if db.URL != "" {
+		u, err := url.Parse(db.URL)
+		if err != nil {
+			return Database{}, fmt.Errorf("DATABASE_URL: invalid URL: %w", err)
+		}
+		if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+			return Database{}, fmt.Errorf("DATABASE_URL: scheme must be postgres or postgresql, got %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return Database{}, fmt.Errorf("DATABASE_URL: must include a host")
+		}
+	}
+
+	if db.MaxIdleConns > db.MaxOpenConns {
+		return Database{}, fmt.Errorf("DB_MAX_IDLE_CONNS: must not exceed DB_MAX_OPEN_CONNS")
+	}
+
+	return db, nil
+}
+
 func loadDocs(raw string, env Env) (Docs, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -281,6 +349,19 @@ func intEnv(getenv func(string) string, key string, fallback int) (int, error) {
 	}
 	if value <= 0 {
 		return 0, fmt.Errorf("%s: must be greater than zero", key)
+	}
+	return value, nil
+}
+
+func boolEnv(getenv func(string) string, key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	value, err := strconv.ParseBool(strings.ToLower(raw))
+	if err != nil {
+		return false, fmt.Errorf("%s: invalid boolean %q", key, raw)
 	}
 	return value, nil
 }

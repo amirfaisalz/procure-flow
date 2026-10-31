@@ -41,6 +41,7 @@ type Procurement struct {
 	Description     string
 	Department      string
 	Requester       string
+	RequesterID     string
 	Amount          int64
 	Currency        string
 	Status          Status
@@ -56,6 +57,7 @@ type CreateParams struct {
 	Description string
 	Department  string
 	Requester   string
+	RequesterID string
 	Amount      int64
 	Currency    string
 }
@@ -70,6 +72,7 @@ func New(id, number string, params CreateParams, now time.Time) (Procurement, er
 		Description: strings.TrimSpace(params.Description),
 		Department:  strings.TrimSpace(params.Department),
 		Requester:   strings.TrimSpace(params.Requester),
+		RequesterID: strings.TrimSpace(params.RequesterID),
 		Amount:      params.Amount,
 		Currency:    strings.ToUpper(strings.TrimSpace(params.Currency)),
 		Status:      StatusDraft,

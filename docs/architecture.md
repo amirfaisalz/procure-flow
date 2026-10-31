@@ -3,7 +3,8 @@
 ## Goals
 
 - Keep business rules independent of HTTP and storage.
-- Use only the Go standard library at runtime.
+- Use the Go standard library for HTTP, logging, and SQL (`database/sql`). The
+  only runtime dependency is the pure-Go `pgx` database driver.
 - Make failure modes explicit (typed errors, problem documents, timeouts).
 - Make the HTTP layer testable end-to-end without a live database.
 
@@ -17,7 +18,8 @@ cmd/api
        └─ response                     JSON + RFC 9457 helpers
   └─ internal/application/procurement  (use cases)
   └─ internal/domain/procurement       (aggregate + repository port)
-       └─ internal/infrastructure/memory (adapter)
+       └─ internal/infrastructure/memory   (local adapter)
+       └─ internal/infrastructure/postgres (production adapter)
   └─ internal/platform                 (IDs, request IDs, logging)
   └─ internal/config                   (environment configuration)
 ```
@@ -36,8 +38,9 @@ Dependencies point inward:
 | Field | Notes |
 | --- | --- |
 | `ID` | `prc_` + 32 hex characters |
-| `Number` | `PR-YYYYMM-XXXXXXXX`, human reference |
+| `Number` | `PR-YYYYMM-XXXXXXXXXXXXXXXX`, human reference (64-bit entropy, unique) |
 | `Amount` | `int64` minor units; avoids float rounding |
+| `RequesterID` | authenticated subject that created the request (optional today) |
 | `Currency` | ISO 4217, normalized to upper case |
 | `Status` | `draft`, `submitted`, `approved`, `rejected`, `cancelled` |
 | `Version` | optimistic concurrency token |
@@ -68,9 +71,29 @@ type Repository interface {
 }
 ```
 
-The in-memory adapter is the reference implementation used by tests. A SQL
-adapter must preserve the same contract, including returning copies and
-honoring context cancellation.
+Two adapters implement the port:
+
+- `infrastructure/memory` — thread-safe reference implementation for local
+  development and tests.
+- `infrastructure/postgres` — `database/sql` adapter with optimistic updates
+  (`UPDATE ... WHERE id = $1 AND version = $2`), unique constraints on `id` and
+  `number`, and `ILIKE` search.
+
+Both adapters run the same contract suite
+(`internal/infrastructure/repositorytest`). PostgreSQL integration tests run
+when `TEST_DATABASE_URL` is set and are skipped otherwise.
+
+`postgres.UnitOfWork` puts a `*sql.Tx` in the context. Repositories resolve the
+transaction from the context, so future use cases can write the aggregate and
+its audit events atomically without leaking SQL into the application layer.
+
+### Migrations
+
+`migrations/*.sql` are embedded with `//go:embed` and applied by
+`migrations.Up`. The runner takes a PostgreSQL advisory lock, records versions
+in `schema_migrations`, and executes each migration in a transaction. Every
+migration ships with a matching `.down.sql`. Startup applies migrations when
+`DB_AUTO_MIGRATE=true`; `cmd/migrate` exposes `up`, `down`, and `status`.
 
 ## HTTP layer
 
@@ -134,18 +157,22 @@ Unknown errors are logged with the request ID and never expose internal detail.
 
 ## Server lifecycle
 
-1. Load and validate configuration.
-2. Build logger, repository, service, health checks, router.
-3. `net.Listen` first so binding errors surface before serving.
-4. `Serve` in a goroutine.
-5. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
-6. Return after in-flight requests drain or the budget expires.
+1. Load and validate configuration (production requires `DATABASE_URL`).
+2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapter.
+3. Build logger, service, health checks, router.
+4. `net.Listen` first so binding errors surface before serving.
+5. `Serve` in a goroutine.
+6. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
+7. Return after in-flight requests drain or the budget expires.
 
 ## Testing strategy
 
 - Domain: table-driven invariant and transition tests.
 - Application: fake repository asserting calls and version expectations.
-- Infrastructure: concurrency, filtering, pagination, context cancellation.
+- Infrastructure: a shared repository contract run against memory and
+  PostgreSQL, covering concurrency, uniqueness, filtering, pagination, and
+  context cancellation. PostgreSQL tests are gated by `TEST_DATABASE_URL`.
 - Transport: end-to-end `httptest` coverage of status codes, envelopes, and
   problem documents; server lifecycle tests with real listeners.
-- `go test -race ./...` is part of the definition of done.
+- `go test -race ./...` is part of the definition of done; CI runs it against a
+  PostgreSQL service container.

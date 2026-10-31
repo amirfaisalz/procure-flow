@@ -1,8 +1,15 @@
 .git
 .gitignore
+.github/
+.env
+.env.*
 bin/
 coverage.out
 Dockerfile
 .dockerignore
 README.md
 docs/
+scripts/
+deployments/
+configs/
+

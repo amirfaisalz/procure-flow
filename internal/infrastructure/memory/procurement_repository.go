@@ -14,14 +14,16 @@ import (
 // development and tests. Replace it with a SQL adapter in production without
 // changing the application layer.
 type ProcurementRepository struct {
-	mu    sync.RWMutex
-	items map[string]procurement.Procurement
+	mu      sync.RWMutex
+	items   map[string]procurement.Procurement
+	numbers map[string]string
 }
 
 // NewProcurementRepository creates an empty repository.
 func NewProcurementRepository() *ProcurementRepository {
 	return &ProcurementRepository{
-		items: make(map[string]procurement.Procurement),
+		items:   make(map[string]procurement.Procurement),
+		numbers: make(map[string]string),
 	}
 }
 
@@ -42,7 +44,11 @@ func (r *ProcurementRepository) Create(ctx context.Context, p procurement.Procur
 	if _, exists := r.items[p.ID]; exists {
 		return domain.ErrConflict
 	}
+	if _, exists := r.numbers[p.Number]; exists {
+		return domain.ErrConflict
+	}
 	r.items[p.ID] = p
+	r.numbers[p.Number] = p.ID
 	return nil
 }
 
@@ -77,6 +83,13 @@ func (r *ProcurementRepository) Update(ctx context.Context, p procurement.Procur
 	}
 	if stored.Version != expectedVersion {
 		return domain.ErrConflict
+	}
+	if stored.Number != p.Number {
+		if id, exists := r.numbers[p.Number]; exists && id != p.ID {
+			return domain.ErrConflict
+		}
+		delete(r.numbers, stored.Number)
+		r.numbers[p.Number] = p.ID
 	}
 	r.items[p.ID] = p
 	return nil

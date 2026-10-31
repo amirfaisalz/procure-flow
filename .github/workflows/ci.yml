@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Format, vet, test, build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: procure
+          POSTGRES_PASSWORD: procure
+          POSTGRES_DB: procure
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U procure -d procure"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://procure:procure@127.0.0.1:5432/procure?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check modules are tidy
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race, with PostgreSQL)
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        run: go build -trimpath ./...
+
+      - name: Build container image
+        run: docker build -t procure-flow:ci .

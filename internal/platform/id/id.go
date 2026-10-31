@@ -23,9 +23,11 @@ func (Generator) NewID() string {
 	return "prc_" + randomHex(16)
 }
 
-// NewNumber returns a request number such as PR-202610-A1B2C3D4.
+// NewNumber returns a request number such as PR-202610-A1B2C3D4E5F60718.
+// The suffix carries 64 bits of entropy so collisions stay negligible even at
+// high monthly volumes. The database additionally enforces uniqueness.
 func (Generator) NewNumber(now time.Time) string {
-	return fmt.Sprintf("PR-%s-%s", now.UTC().Format("200601"), strings.ToUpper(randomHex(4)))
+	return fmt.Sprintf("PR-%s-%s", now.UTC().Format("200601"), strings.ToUpper(randomHex(8)))
 }
 
 var fallbackCounter atomic.Uint64

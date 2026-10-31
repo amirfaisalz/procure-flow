@@ -1,4 +1,23 @@
 services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: procure
+      POSTGRES_PASSWORD: procure
+      POSTGRES_DB: procure
+    ports:
+      # Host port 55432 avoids clashing with a locally installed PostgreSQL.
+      - "55432:5432"
+    volumes:
+      # PostgreSQL 18 stores PGDATA under /var/lib/postgresql/18/docker.
+      - procure-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U procure -d procure"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   api:
     build:
       context: ..
@@ -15,7 +34,15 @@ services:
       CORS_ALLOWED_ORIGINS: ""
       # Local compose keeps the interactive reference enabled for testing.
       DOCS_ENABLED: "true"
+      DATABASE_URL: "postgres://procure:procure@db:5432/procure?sslmode=disable"
+      DB_AUTO_MIGRATE: "true"
+    depends_on:
+      db:
+        condition: service_healthy
     read_only: true
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+
+volumes:
+  procure-db:

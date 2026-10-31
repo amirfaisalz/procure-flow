@@ -285,7 +285,8 @@ components:
           example: prc_4655b358bf93a50be264cace48feefeb
         number:
           type: string
-          example: PR-202610-BD08EF2B
+          pattern: "^PR-[0-9]{6}-[A-F0-9]{16}$"
+          example: PR-202610-BD08EF2B4C6A1D9F
         title:
           type: string
         description:
@@ -294,6 +295,10 @@ components:
           type: string
         requester:
           type: string
+        requester_id:
+          type: string
+          readOnly: true
+          description: Authenticated subject that created the request.
         amount:
           type: integer
           format: int64

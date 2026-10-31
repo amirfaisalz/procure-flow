@@ -1,21 +1,37 @@
 # Migrations
 
-This directory is reserved for database migrations once a SQL repository
-adapter is introduced.
+Reversible SQL migrations embedded into the binary and applied by
+`migrations.Up` (`internal` runner in this package).
 
 ## Conventions
 
-- Use sequential, zero-padded filenames: `0001_create_procurements.up.sql` and
+- Sequential, zero-padded filenames: `0001_create_procurements.up.sql` and
   `0001_create_procurements.down.sql`.
 - Every migration must be reversible.
 - Migrations must not depend on application code.
-- Apply migrations in a transaction when the database supports transactional
-  DDL.
+- Each migration runs in its own transaction.
 - Never edit an applied migration; add a new one instead.
+- A PostgreSQL advisory lock serialises concurrent migrators.
 
-## Expected schema
+## Running
 
-The procurement aggregate maps to a table with:
+```bash
+# Apply everything pending
+go run ./cmd/migrate up
+
+# Show applied/pending state
+go run ./cmd/migrate status
+
+# Roll back the most recent migration
+go run ./cmd/migrate down
+```
+
+`DATABASE_URL` must be set. The application also applies pending migrations on
+startup when `DB_AUTO_MIGRATE=true` (the default).
+
+## Current schema
+
+### `procurements`
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -24,16 +40,17 @@ The procurement aggregate maps to a table with:
 | `title` | `text` | |
 | `description` | `text` | |
 | `department` | `text` | |
-| `requester` | `text` | |
-| `amount` | `bigint` | minor units |
-| `currency` | `char(3)` | ISO 4217 |
+| `requester` | `text` | display name |
+| `requester_id` | `text` | authenticated subject |
+| `amount` | `bigint` | minor units, `> 0` |
+| `currency` | `text` | `^[A-Z]{3}$` |
 | `status` | `text` | check constraint on allowed values |
 | `rejection_reason` | `text` | |
 | `created_at` | `timestamptz` | |
 | `updated_at` | `timestamptz` | |
-| `version` | `integer` | optimistic concurrency |
+| `version` | `integer` | optimistic concurrency, `> 0` |
 
-Optimistic updates must use:
+Optimistic updates use:
 
 ```sql
 UPDATE procurements
@@ -41,4 +58,9 @@ SET ..., version = version + 1, updated_at = $n
 WHERE id = $1 AND version = $2;
 ```
 
-A zero-row result means the caller must return `domain.ErrConflict`.
+A zero-row result maps to `domain.ErrConflict` (or `domain.ErrNotFound` when the
+row does not exist).
+
+### `schema_migrations`
+
+Managed by the runner: `version text primary key`, `applied_at timestamptz`.
