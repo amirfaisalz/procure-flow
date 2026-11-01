@@ -15,7 +15,7 @@ import (
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 )
@@ -35,7 +35,7 @@ func (s *sequentialIDs) NewNumber(now time.Time) string {
 	return fmt.Sprintf("PR-%s-%04d", now.Format("200601"), s.next)
 }
 
-func buildRouter(t *testing.T, repo *memory.ProcurementRepository, checks map[string]handler.Check) http.Handler {
+func buildRouter(t *testing.T, repo *testsupport.ProcurementRepository, checks map[string]handler.Check) http.Handler {
 	t.Helper()
 
 	service := app.NewService(repo, &sequentialIDs{}, func() time.Time { return testNow })
@@ -58,10 +58,10 @@ func buildRouter(t *testing.T, repo *memory.ProcurementRepository, checks map[st
 	})
 }
 
-func newTestRouter(t *testing.T) (http.Handler, *memory.ProcurementRepository) {
+func newTestRouter(t *testing.T) (http.Handler, *testsupport.ProcurementRepository) {
 	t.Helper()
 
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	return buildRouter(t, repo, map[string]handler.Check{"repository": repo.Ping}), repo
 }
 
@@ -458,7 +458,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestReadyFailure(t *testing.T) {
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	h := buildRouter(t, repo, map[string]handler.Check{
 		"database": func(ctx context.Context) error {
 			return errors.New("database is down")

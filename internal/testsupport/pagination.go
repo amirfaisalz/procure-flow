@@ -1,4 +1,4 @@
-package memory
+package testsupport
 
 // pageStart returns the zero-based index of the first item on page. Pages past
 // the end clamp to total, which also keeps the multiplication from overflowing

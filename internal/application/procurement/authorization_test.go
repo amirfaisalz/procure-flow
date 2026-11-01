@@ -11,7 +11,7 @@ import (
 	"github.com/amirfaisalz/procure-flow/internal/domain"
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 )
 
 func ctxAs(subject string, roles ...string) context.Context {
@@ -336,8 +336,8 @@ func TestServiceCancelOwnership(t *testing.T) {
 }
 
 func TestServiceAuditRecordsLifecycle(t *testing.T) {
-	procurements := memory.NewProcurementRepository()
-	auditRepo := memory.NewAuditRepository()
+	procurements := testsupport.NewProcurementRepository()
+	auditRepo := testsupport.NewAuditRepository()
 	uow := &fakeUnitOfWork{}
 
 	svc := app.NewService(

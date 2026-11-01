@@ -9,12 +9,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	authapp "github.com/amirfaisalz/procure-flow/internal/application/auth"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/platform/password"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 )
 
 func TestSeedDemoAccounts(t *testing.T) {
-	repo := memory.NewUserRepository()
+	repo := testsupport.NewUserRepository()
 	hasher := password.New(bcrypt.MinCost)
 	counter := 0
 	newID := func() string {

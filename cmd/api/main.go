@@ -21,7 +21,6 @@ import (
 	"github.com/amirfaisalz/procure-flow/internal/domain/outbox"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/domain/user"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/postgres"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/rabbitmq"
 	redisstore "github.com/amirfaisalz/procure-flow/internal/infrastructure/redis"
@@ -275,46 +274,9 @@ type storage struct {
 	close        func() error
 }
 
-// openStorage selects PostgreSQL when DATABASE_URL is set and falls back to the
-// in-memory adapters otherwise. Production requires a database (enforced by
-// config validation).
+// openStorage always connects to PostgreSQL; configuration rejects a missing
+// DATABASE_URL before this point.
 func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
-	if cfg.Database.URL == "" {
-		repo := memory.NewProcurementRepository()
-		users := memory.NewUserRepository()
-		logger.Warn("using in-memory repository; data will not survive a restart")
-
-		// Local runs stay login-protected: seed the demo accounts so `make run`
-		// is usable without a database. Production always has DATABASE_URL and
-		// uses cmd/seed instead.
-		if cfg.Auth.Enabled && cfg.Env == config.EnvDevelopment {
-			seeded, err := authapp.SeedDemoAccounts(
-				context.Background(), users, password.NewDefault(),
-				id.NewGenerator().NewUserID, authapp.DemoPassword, time.Now,
-			)
-			if err != nil {
-				return storage{}, fmt.Errorf("seed development accounts: %w", err)
-			}
-			emails := make([]string, len(seeded))
-			for i, account := range seeded {
-				emails[i] = account.Email
-			}
-			logger.Warn("development login accounts seeded in memory",
-				slog.Any("emails", emails),
-				slog.String("password", authapp.DemoPassword),
-			)
-		}
-
-		return storage{
-			procurements: repo,
-			users:        users,
-			audit:        memory.NewAuditRepository(),
-			idempotency:  memory.NewIdempotencyRepository(),
-			outbox:       memory.NewOutboxRepository(),
-			ping:         repo.Ping,
-		}, nil
-	}
-
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelConnect()
 

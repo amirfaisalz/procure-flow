@@ -10,9 +10,9 @@
 @baseUrl = http://localhost:8080
 @contentType = application/json
 
-# Authentication is disabled in development by default, so these requests work
-# without credentials. When AUTH_ENABLED=true, run the login request below: the
-# REST Client keeps the HttpOnly session cookie and sends it automatically.
+# Authentication is required in every environment. Run the login request below
+# first: the REST Client keeps the HttpOnly session cookie and sends it
+# automatically.
 # Bearer credentials still work; add this header to any /api/v1 request:
 #   Authorization: Bearer <token>
 # The local compose stack ships with `local-admin-token-0123456789`.

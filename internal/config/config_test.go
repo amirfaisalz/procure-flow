@@ -9,9 +9,20 @@ import (
 	"github.com/amirfaisalz/procure-flow/internal/config"
 )
 
+const testDatabaseURL = "postgres://user:pass@localhost:5432/procure?sslmode=disable"
+
+// env returns a lookup function. Tests that do not care about the database get
+// a valid URL by default; pass DATABASE_URL explicitly (including "") to
+// override it.
 func env(values map[string]string) func(string) string {
 	return func(key string) string {
-		return values[key]
+		if value, ok := values[key]; ok {
+			return value
+		}
+		if key == "DATABASE_URL" {
+			return testDatabaseURL
+		}
+		return ""
 	}
 }
 

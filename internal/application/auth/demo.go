@@ -26,9 +26,8 @@ type PasswordHasher interface {
 	Hash(plain string) (string, error)
 }
 
-// DemoAccounts returns the accounts created by cmd/seed, the compose seed
-// service, and the in-memory development bootstrap. Emails use .local so they
-// can never collide with a real domain.
+// DemoAccounts returns the accounts created by cmd/seed and the compose seed
+// service. Emails use .local so they can never collide with a real domain.
 func DemoAccounts() []DemoAccount {
 	return []DemoAccount{
 		{Email: "admin@procure.local", Name: "Local Admin", Roles: []string{"admin"}},

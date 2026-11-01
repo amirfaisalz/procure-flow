@@ -14,11 +14,11 @@ import (
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
 	"github.com/amirfaisalz/procure-flow/internal/domain/user"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
 	"github.com/amirfaisalz/procure-flow/internal/platform/metrics"
 	"github.com/amirfaisalz/procure-flow/internal/platform/password"
 	"github.com/amirfaisalz/procure-flow/internal/platform/ratelimit"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 )
@@ -45,7 +45,7 @@ type sessionBody struct {
 func buildSessionRouter(t *testing.T, configure func(*httpapi.Dependencies)) http.Handler {
 	t.Helper()
 
-	users := memory.NewUserRepository()
+	users := testsupport.NewUserRepository()
 	hasher := password.New(bcrypt.MinCost)
 	for _, account := range authapp.DemoAccounts() {
 		hash, err := hasher.Hash(authapp.DemoPassword)
@@ -75,7 +75,7 @@ func buildSessionRouter(t *testing.T, configure func(*httpapi.Dependencies)) htt
 		CookieSecure: true,
 	}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 
-	procurementRepo := memory.NewProcurementRepository()
+	procurementRepo := testsupport.NewProcurementRepository()
 	service := app.NewService(procurementRepo, &sequentialIDs{}, func() time.Time { return testNow })
 	health := handler.NewHealthWithOptional("test", map[string]handler.Check{"repository": procurementRepo.Ping}, nil)
 
@@ -103,7 +103,7 @@ func buildSessionRouter(t *testing.T, configure func(*httpapi.Dependencies)) htt
 		Health:        health,
 		Authenticator: authenticator,
 		Auth:          authHandler,
-		Idempotency:   memory.NewIdempotencyRepository(),
+		Idempotency:   testsupport.NewIdempotencyRepository(),
 		Metrics:       metrics.NewRegistry(),
 	}
 	if configure != nil {

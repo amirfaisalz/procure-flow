@@ -14,8 +14,8 @@ func TestLoadDatabaseDefaults(t *testing.T) {
 		t.Fatalf("LoadFrom() error = %v", err)
 	}
 
-	if cfg.Database.URL != "" {
-		t.Errorf("Database.URL = %q, want empty (memory mode)", cfg.Database.URL)
+	if cfg.Database.URL != testDatabaseURL {
+		t.Errorf("Database.URL = %q, want %q", cfg.Database.URL, testDatabaseURL)
 	}
 	if cfg.Database.MaxOpenConns != 25 {
 		t.Errorf("MaxOpenConns = %d, want 25", cfg.Database.MaxOpenConns)
@@ -115,13 +115,20 @@ func TestLoadDatabaseInvalid(t *testing.T) {
 	}
 }
 
-func TestLoadDatabaseRequiredInProduction(t *testing.T) {
-	_, err := config.LoadFrom(env(map[string]string{"APP_ENV": "production"}))
-	if err == nil {
-		t.Fatal("LoadFrom() error = nil, want error")
-	}
-	if !strings.Contains(err.Error(), "DATABASE_URL") {
-		t.Errorf("error = %q, want it to mention DATABASE_URL", err)
+func TestLoadDatabaseRequired(t *testing.T) {
+	for _, environment := range []string{"development", "staging", "production"} {
+		t.Run(environment, func(t *testing.T) {
+			_, err := config.LoadFrom(env(map[string]string{
+				"APP_ENV":      environment,
+				"DATABASE_URL": "",
+			}))
+			if err == nil {
+				t.Fatal("LoadFrom() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), "DATABASE_URL") {
+				t.Errorf("error = %q, want it to mention DATABASE_URL", err)
+			}
+		})
 	}
 
 	if _, err := config.LoadFrom(env(map[string]string{

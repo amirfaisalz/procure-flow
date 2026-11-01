@@ -62,8 +62,13 @@ vet: ## Run go vet
 fmt: ## Format all Go files
 	go fmt ./...
 
+.PHONY: verify-layout
+verify-layout: ## Ensure command binaries never link in-memory test doubles
+	@if go list -deps ./cmd/... | grep -q 'internal/testsupport'; then \
+		echo "error: cmd/ must not depend on internal/testsupport"; exit 1; fi
+
 .PHONY: check
-check: fmt vet test-integration ## Format, vet, and race-test (with database)
+check: fmt vet verify-layout test-integration ## Format, vet, and race-test (with database)
 
 .PHONY: tidy
 tidy: ## Tidy modules

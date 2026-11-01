@@ -82,5 +82,12 @@ jobs:
       - name: Build
         run: go build -trimpath ./...
 
+      - name: Ensure commands do not link test doubles
+        run: |
+          if go list -deps ./cmd/... | grep -q 'internal/testsupport'; then
+            echo "cmd/ must not depend on internal/testsupport"
+            exit 1
+          fi
+
       - name: Build container image
         run: docker build -t procure-flow:ci .

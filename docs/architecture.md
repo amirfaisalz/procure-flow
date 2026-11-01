@@ -28,13 +28,13 @@ cmd/seed                               demo account seeder
   └─ internal/domain/event             (event envelope)
   └─ internal/domain/outbox            (transactional outbox port)
   └─ internal/domain/user              (account aggregate + repository port)
-       └─ internal/infrastructure/memory   (local adapters)
-       └─ internal/infrastructure/postgres (production adapters)
+       └─ internal/infrastructure/postgres (PostgreSQL adapters)
        └─ internal/infrastructure/redis   (limiter client + JSON cache)
        └─ internal/infrastructure/rabbitmq (publisher + consumers)
   └─ internal/platform                 (IDs, request IDs, logging, auth,
                                         rate limiting, metrics, tracing, relay)
   └─ internal/config                   (environment configuration)
+  └─ internal/testsupport              (test-only in-memory doubles)
 ```
 
 Dependencies point inward:
@@ -84,17 +84,16 @@ type Repository interface {
 }
 ```
 
-Two adapters implement the port:
+The PostgreSQL adapter implements the port with `database/sql`, optimistic
+updates (`UPDATE ... WHERE id = $1 AND version = $2`), unique constraints on
+`id` and `number`, and `ILIKE` search. There is no runtime in-memory backend:
+`DATABASE_URL` is mandatory in every environment.
 
-- `infrastructure/memory` — thread-safe reference implementation for local
-  development and tests.
-- `infrastructure/postgres` — `database/sql` adapter with optimistic updates
-  (`UPDATE ... WHERE id = $1 AND version = $2`), unique constraints on `id` and
-  `number`, and `ILIKE` search.
-
-Both adapters run the same contract suite
-(`internal/infrastructure/repositorytest`). PostgreSQL integration tests run
-when `TEST_DATABASE_URL` is set and are skipped otherwise.
+The adapter runs the shared contract suite in
+`internal/infrastructure/repositorytest`. Handler and application tests use the
+test-only doubles in `internal/testsupport`, which no command imports. PostgreSQL
+integration tests run when `TEST_DATABASE_URL` is set and are skipped
+otherwise.
 
 `postgres.UnitOfWork` puts a `*sql.Tx` in the context. Repositories resolve the
 transaction from the context, so the use cases write the aggregate and its
@@ -157,7 +156,7 @@ read newest first through `GET /api/v1/procurements/{id}/audit`, paginated with
 ## Idempotency
 
 `internal/domain/idempotency` defines a claim/replay port implemented by the
-memory and PostgreSQL adapters. `POST /api/v1/procurements` is wrapped by
+PostgreSQL adapter (tests use a test double). `POST /api/v1/procurements` is wrapped by
 middleware that:
 
 1. hashes the method, URI, and body, scoped to the authenticated actor;
@@ -326,9 +325,9 @@ Unknown errors are logged with the request ID and never expose internal detail.
 
 ## Server lifecycle
 
-1. Load and validate configuration (production requires `DATABASE_URL` and
-   authentication).
-2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapters.
+1. Load and validate configuration (`DATABASE_URL` is required, and
+   authentication outside development).
+2. Open PostgreSQL and apply migrations.
 3. Create the Redis client (if configured) and assemble the cache and limiter.
 4. Create the RabbitMQ publisher (if configured), register its optional health
    check, and start the outbox relay goroutine.
@@ -347,26 +346,27 @@ Unknown errors are logged with the request ID and never expose internal detail.
   policy tests for every role and department/ownership combination.
 - Authentication: API-key and JWT acceptance/rejection tables, including
   expired, wrong-audience, bad-signature, malformed, and `alg: none` tokens.
-- Idempotency: repository claim/replay contract against memory and PostgreSQL,
-  plus middleware tests for replay, key reuse, in-progress, 5xx release, and
-  actor isolation.
+- Idempotency: repository claim/replay contract against PostgreSQL, plus
+  middleware tests for replay, key reuse, in-progress, 5xx release, and actor
+  isolation.
 - Rate limiting and metrics: token-bucket refill/pruning, Redis Lua bucket
   atomicity across clients, fallback behaviour, 429 mapping, and Prometheus
   rendering with bounded route labels.
 - Caching: hit/miss behaviour, invalidation, generation fencing against stale
   writes, and graceful degradation on cache errors (fake cache), plus Redis
   set/get/TTL/corruption tests.
-- Outbox: one shared contract for memory and PostgreSQL covering enqueue,
-  ordered claiming, lease expiry, publish, backoff, and pruning; relay tests
-  cover publish success, failure scheduling, and shutdown.
+- Outbox: a PostgreSQL repository contract covering enqueue, ordered claiming,
+  lease expiry, publish, backoff, and pruning; relay tests cover publish
+  success, failure scheduling, and shutdown.
 - Events: the service emits the right type and payload per transition and
   fails the transaction when the outbox write fails.
 - Messaging: publisher confirm round-trip against RabbitMQ, consumer
   ack/retry/dead-letter decisions, and webhook handler payloads.
-- Infrastructure: a shared repository contract run against memory and
-  PostgreSQL, covering concurrency, uniqueness, filtering, pagination, and
-  context cancellation. PostgreSQL, Redis, and RabbitMQ tests are gated by
-  `TEST_DATABASE_URL`, `TEST_REDIS_URL`, and `TEST_RABBITMQ_URL`.
+- Infrastructure: a repository contract run against PostgreSQL covering
+  concurrency, uniqueness, filtering, pagination, and context cancellation;
+  handler tests use `internal/testsupport` doubles. PostgreSQL, Redis, and
+  RabbitMQ tests are gated by `TEST_DATABASE_URL`, `TEST_REDIS_URL`, and
+  `TEST_RABBITMQ_URL`.
 - Transport: end-to-end `httptest` coverage of status codes, envelopes, and
   problem documents; server lifecycle tests with real listeners.
 - `go test -race ./...` is part of the definition of done; CI runs it against

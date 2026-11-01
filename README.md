@@ -82,14 +82,15 @@ application ───────────── use cases, authorization, ca
 domain ────────────────── aggregate, state machine, repository ports
         ▲
         │
-infrastructure ────────── memory · postgres · redis · rabbitmq
+infrastructure ────────── postgres · redis · rabbitmq
 ```
 
 Dependencies point inward. The domain layer imports only the standard library,
 so business rules run without a database; the application layer depends on
 interfaces, never on an adapter; infrastructure implements those interfaces.
-The same repository contract suite runs against the in-memory and PostgreSQL
-adapters, which is why the fast tests are meaningful.
+A shared repository contract suite runs against the PostgreSQL adapter, so
+schema and query behaviour stay honest; handlers are tested with test-only
+doubles that never ship in the binary.
 
 A full tour — aggregates, transaction boundaries, outbox relay, failure modes —
 is in [`docs/architecture.md`](docs/architecture.md).
@@ -197,16 +198,20 @@ reference with an in-browser request client.
 
 ## Running locally
 
-No containers needed for the in-memory mode:
+PostgreSQL is the only storage backend; the API refuses to start without
+`DATABASE_URL`. Start the services, then run the API and seed the login accounts:
 
 ```bash
-make run
+make deps-up            # PostgreSQL :55432 · Redis :56379 · RabbitMQ :5672
+
+export DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'
+make run                # applies embedded migrations on startup
+make seed               # creates the four demo login accounts
+make worker             # in a second terminal
 ```
 
-Data lives in memory and disappears with the process. Authentication is on by
-default: the API generates an ephemeral signing key and seeds four demo accounts
-in memory, so log in with `admin@procure.local` / `demo-password-123` before
-calling `/api/v1`:
+Authentication is on by default, so log in with `admin@procure.local` /
+`demo-password-123` before calling `/api/v1`:
 
 ```bash
 curl -s -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
@@ -214,22 +219,9 @@ curl -s -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
   -d '{"email":"admin@procure.local","password":"demo-password-123"}'
 ```
 
-`APP_ENV=production` refuses to start without `DATABASE_URL`, so a misconfigured
-deploy fails loudly instead of silently losing writes.
-
-For the full stack on the host:
-
-```bash
-make deps-up            # PostgreSQL :55432 · Redis :56379 · RabbitMQ :5672
-
-export DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'
-export REDIS_URL='redis://127.0.0.1:56379/0'
-export RABBITMQ_URL='amqp://guest:guest@127.0.0.1:5672/'
-export RATE_LIMIT_STORE=redis
-
-make run                # applies embedded migrations on startup
-make worker             # in a second terminal
-```
+Redis and RabbitMQ are optional: drop `REDIS_URL`, `RABBITMQ_URL`, and
+`RATE_LIMIT_STORE` and the API runs against PostgreSQL alone, falling back to an
+in-process limiter and skipping event emission.
 
 The worker logs one notification per lifecycle event and simulates the ERP sync
 unless webhooks are configured. Migrations can also run as a separate step:
@@ -389,7 +381,7 @@ Environment variables only; `.env` is not read automatically. The essentials:
 | --- | --- | --- |
 | `APP_ENV` | `development` | `production` turns on strict preconditions |
 | `HTTP_ADDR` | `:8080` | Listen address |
-| `DATABASE_URL` | *(empty)* | Empty selects the in-memory repository |
+| `DATABASE_URL` | *(required)* | PostgreSQL connection URL |
 | `AUTH_ENABLED` | `true` | Every `/api/v1` route needs a login; development may opt out |
 | `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | Credentials; development generates a temporary secret |
 | `AUTH_SESSION_TTL` | `8h` | Login cookie lifetime |
@@ -515,9 +507,9 @@ make cover             # coverage summary
 | `make build` | Binary in `bin/` |
 
 Tests live next to the code they exercise. The shared repository contract in
-`internal/infrastructure/repositorytest` runs against both adapters, so the
-in-memory implementation and PostgreSQL cannot drift apart silently. Integration
-tests are gated by `TEST_DATABASE_URL`, `TEST_REDIS_URL`, and
+`internal/infrastructure/repositorytest` runs against PostgreSQL, while handler
+and application tests use the test-only doubles in `internal/testsupport`.
+Integration tests are gated by `TEST_DATABASE_URL`, `TEST_REDIS_URL`, and
 `TEST_RABBITMQ_URL`.
 
 CI runs `gofmt`, `go mod tidy -diff`, `go vet`, `go test -race` with PostgreSQL,
@@ -533,7 +525,8 @@ cmd/seed/                      demo account seeder
 internal/config/               environment configuration
 internal/domain/               domain errors, procurement aggregate, ports
 internal/application/          use cases, cache port, event emission
-internal/infrastructure/       memory · postgres · redis · rabbitmq adapters
+internal/infrastructure/       postgres · redis · rabbitmq adapters
+internal/testsupport/          in-memory test doubles (never linked by cmd/)
 internal/platform/             IDs, logging, auth, rate limiting, metrics,
                                tracing, outbox relay
 internal/transport/httpapi/    router, handlers, middleware, RFC 9457 helpers

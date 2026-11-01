@@ -1,4 +1,4 @@
-package memory_test
+package testsupport_test
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 
 	"github.com/amirfaisalz/procure-flow/internal/domain"
 	"github.com/amirfaisalz/procure-flow/internal/domain/procurement"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 )
 
 var baseTime = time.Date(2026, time.October, 31, 10, 0, 0, 0, time.UTC)
@@ -32,7 +32,7 @@ func newProcurement(t *testing.T, id, number, title, department string, createdA
 
 func TestRepositoryCreateAndGet(t *testing.T) {
 	ctx := context.Background()
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	p := newProcurement(t, "prc_1", "PR-202610-0001", "Laptop procurement", "Engineering", baseTime)
 
 	if err := repo.Create(ctx, p); err != nil {
@@ -58,7 +58,7 @@ func TestRepositoryCreateAndGet(t *testing.T) {
 
 func TestRepositoryListFilterAndPagination(t *testing.T) {
 	ctx := context.Background()
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 
 	items := []procurement.Procurement{
 		newProcurement(t, "prc_1", "PR-202610-0001", "Laptop engineering", "Engineering", baseTime.Add(1*time.Minute)),
@@ -156,7 +156,7 @@ func TestRepositoryListFilterAndPagination(t *testing.T) {
 
 func TestRepositoryUpdateOptimisticConcurrency(t *testing.T) {
 	ctx := context.Background()
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	p := newProcurement(t, "prc_1", "PR-202610-0001", "Laptop procurement", "Engineering", baseTime)
 	if err := repo.Create(ctx, p); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -192,7 +192,7 @@ func TestRepositoryUpdateOptimisticConcurrency(t *testing.T) {
 
 func TestRepositoryReturnsCopies(t *testing.T) {
 	ctx := context.Background()
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	p := newProcurement(t, "prc_1", "PR-202610-0001", "Laptop procurement", "Engineering", baseTime)
 	if err := repo.Create(ctx, p); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -214,7 +214,7 @@ func TestRepositoryReturnsCopies(t *testing.T) {
 }
 
 func TestRepositoryContextCancellation(t *testing.T) {
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	p := newProcurement(t, "prc_1", "PR-202610-0001", "Laptop procurement", "Engineering", baseTime)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -238,7 +238,7 @@ func TestRepositoryContextCancellation(t *testing.T) {
 }
 
 func TestRepositoryPing(t *testing.T) {
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	if err := repo.Ping(context.Background()); err != nil {
 		t.Errorf("Ping() error = %v, want nil", err)
 	}

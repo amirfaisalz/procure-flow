@@ -38,7 +38,7 @@ tables below with inline comments.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | *(empty)* | PostgreSQL URL; empty selects the in-memory repository |
+| `DATABASE_URL` | *(required)* | PostgreSQL connection URL; no other backend exists |
 | `DB_MAX_OPEN_CONNS` | `25` | Maximum open connections |
 | `DB_MAX_IDLE_CONNS` | `25` | Maximum idle connections |
 | `DB_CONN_MAX_LIFETIME` | `30m` | Connection maximum lifetime |
@@ -149,26 +149,15 @@ precondition is missing:
 - `RATE_LIMIT_STORE=redis` requires `REDIS_URL`, and `REDIS_URL` must use the
   `redis://` or `rediss://` scheme.
 - Webhook URLs must use `http://` or `https://`.
+- `DATABASE_URL` is required in every environment.
 - Staging and production require `AUTH_ENABLED=true` and at least one of
-  `AUTH_API_KEYS` or `AUTH_JWT_SECRET`; production also requires `DATABASE_URL`.
+  `AUTH_API_KEYS` or `AUTH_JWT_SECRET`.
 - In development, an unset `AUTH_JWT_SECRET` is replaced by a random ephemeral
   secret so login works out of the box. Sessions do not survive a restart.
 
 ## Profiles
 
-### In-memory (zero dependencies)
-
-```bash
-make run
-```
-
-`DATABASE_URL` is empty, so the API uses the in-memory repository. All state is
-lost on exit. Authentication stays on: a throwaway signing key is generated and
-the four demo accounts are seeded in memory, so log in with
-`admin@procure.local` / `demo-password-123` before calling `/api/v1`.
-Rate limiting defaults to off in `development`.
-
-### Full local stack
+### Local
 
 ```bash
 make deps-up
@@ -177,23 +166,18 @@ export DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=
 export REDIS_URL='redis://127.0.0.1:56379/0'
 export RABBITMQ_URL='amqp://guest:guest@127.0.0.1:5672/'
 export RATE_LIMIT_STORE=redis
-export AUTH_ENABLED=true
-export AUTH_API_KEYS='[{"token":"local-admin-token-0123456789","subject":"user_admin","name":"Local Admin","roles":["admin"]}]'
 
-make run
-make worker   # second terminal
+make run       # applies migrations on startup
+make seed      # demo login accounts
+make worker    # second terminal
 ```
 
-This enables PostgreSQL persistence, shared rate limiting, the read cache, and
-the outbox relay plus worker. The API now reads accounts from PostgreSQL, so seed
-them first:
-
-```bash
-make seed DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'
-curl -s -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"admin@procure.local","password":"demo-password-123"}'
-```
+Redis and RabbitMQ are optional: leave `REDIS_URL` and `RABBITMQ_URL` unset and
+the API runs against PostgreSQL alone, with an in-process rate limiter and no
+event emission. Authentication stays on; in development an unset
+`AUTH_JWT_SECRET` is replaced by an ephemeral key, and `make seed` creates the
+four demo accounts so you can log in with `admin@procure.local` /
+`demo-password-123`.
 
 ### Production
 

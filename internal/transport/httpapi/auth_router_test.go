@@ -11,10 +11,10 @@ import (
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
 	"github.com/amirfaisalz/procure-flow/internal/platform/metrics"
 	"github.com/amirfaisalz/procure-flow/internal/platform/ratelimit"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 )
@@ -33,8 +33,8 @@ func bearer(token string) map[string]string {
 
 func buildAuthenticatedRouter(
 	t *testing.T,
-	repo *memory.ProcurementRepository,
-	auditRepo *memory.AuditRepository,
+	repo *testsupport.ProcurementRepository,
+	auditRepo *testsupport.AuditRepository,
 	opts ...func(*httpapi.Dependencies),
 ) http.Handler {
 	t.Helper()
@@ -68,7 +68,7 @@ func buildAuthenticatedRouter(
 		Procurement:   service,
 		Health:        health,
 		Authenticator: authenticator,
-		Idempotency:   memory.NewIdempotencyRepository(),
+		Idempotency:   testsupport.NewIdempotencyRepository(),
 		Metrics:       metrics.NewRegistry(),
 	}
 	for _, opt := range opts {
@@ -78,8 +78,8 @@ func buildAuthenticatedRouter(
 }
 
 func TestRouterRejectsAnonymousAPICalls(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository())
+	repo := testsupport.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, testsupport.NewAuditRepository())
 
 	rec := doRequestWithHeaders(router, http.MethodGet, "/api/v1/procurements", "", "", nil)
 	if rec.Code != http.StatusUnauthorized {
@@ -97,8 +97,8 @@ func TestRouterRejectsAnonymousAPICalls(t *testing.T) {
 }
 
 func TestRouterEnforcesRBACAndRecordsAudit(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	auditRepo := memory.NewAuditRepository()
+	repo := testsupport.NewProcurementRepository()
+	auditRepo := testsupport.NewAuditRepository()
 	router := buildAuthenticatedRouter(t, repo, auditRepo)
 
 	const body = `{"title":"Laptop procurement for engineering","description":"20 units","department":"Engineering","requester":"","amount":250000000,"currency":"IDR"}`
@@ -172,8 +172,8 @@ func TestRouterEnforcesRBACAndRecordsAudit(t *testing.T) {
 }
 
 func TestRouterIdempotentCreate(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository())
+	repo := testsupport.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, testsupport.NewAuditRepository())
 
 	const body = `{"title":"Laptop procurement for engineering","description":"20 units","department":"Engineering","amount":250000000,"currency":"IDR"}`
 	headers := bearer(requesterToken)
@@ -224,8 +224,8 @@ func TestRouterIdempotentCreate(t *testing.T) {
 }
 
 func TestRouterRateLimit(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository(), func(deps *httpapi.Dependencies) {
+	repo := testsupport.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, testsupport.NewAuditRepository(), func(deps *httpapi.Dependencies) {
 		deps.Config.RateLimit = config.RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 1}
 		deps.RateLimiter = ratelimit.New(1, 1)
 	})
@@ -243,8 +243,8 @@ func TestRouterRateLimit(t *testing.T) {
 }
 
 func TestRouterRateLimitThrottlesUnauthenticatedRequests(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository(), func(deps *httpapi.Dependencies) {
+	repo := testsupport.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, testsupport.NewAuditRepository(), func(deps *httpapi.Dependencies) {
 		deps.Config.RateLimit = config.RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 1}
 		deps.RateLimiter = ratelimit.New(1, 1)
 	})
@@ -261,8 +261,8 @@ func TestRouterRateLimitThrottlesUnauthenticatedRequests(t *testing.T) {
 }
 
 func TestRouterMetricsAndTracing(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository())
+	repo := testsupport.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, testsupport.NewAuditRepository())
 
 	health := doRequestWithHeaders(router, http.MethodGet, "/healthz", "", "", nil)
 	if health.Code != http.StatusOK {
@@ -302,8 +302,8 @@ func TestRouterMetricsAndTracing(t *testing.T) {
 }
 
 func TestRouterAuditPagination(t *testing.T) {
-	repo := memory.NewProcurementRepository()
-	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository())
+	repo := testsupport.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, testsupport.NewAuditRepository())
 
 	const body = `{"title":"Laptop procurement for engineering","department":"Engineering","amount":250000000,"currency":"IDR"}`
 	created := doRequestWithHeaders(router, http.MethodPost, "/api/v1/procurements", body, "application/json", bearer(requesterToken))
@@ -349,7 +349,7 @@ func TestRouterAuditPagination(t *testing.T) {
 }
 
 func TestSessionEndpointsDisabledWithoutSigningKey(t *testing.T) {
-	router := buildAuthenticatedRouter(t, memory.NewProcurementRepository(), memory.NewAuditRepository(),
+	router := buildAuthenticatedRouter(t, testsupport.NewProcurementRepository(), testsupport.NewAuditRepository(),
 		func(deps *httpapi.Dependencies) {
 			deps.Auth = handler.NewAuth(nil, handler.AuthConfig{CookieName: sessionCookie}, nil)
 		})

@@ -125,8 +125,8 @@ type APIKey struct {
 	Department string
 }
 
-// Database controls the optional PostgreSQL persistence adapter. An empty URL
-// selects the in-memory repository (development and tests only).
+// Database controls the PostgreSQL persistence adapter. The URL is required:
+// PostgreSQL is the only storage backend.
 type Database struct {
 	URL             string
 	MaxOpenConns    int
@@ -308,8 +308,8 @@ func (c Config) validateServer() error {
 	if c.RateLimit.Enabled && c.RateLimit.Store == RateLimitStoreRedis && c.Redis.URL == "" {
 		return fmt.Errorf("RATE_LIMIT_STORE: redis requires REDIS_URL")
 	}
-	if c.Env.IsProduction() && c.Database.URL == "" {
-		return fmt.Errorf("DATABASE_URL: required in production (the in-memory repository is not durable)")
+	if c.Database.URL == "" {
+		return fmt.Errorf("DATABASE_URL: required (PostgreSQL is the only storage backend)")
 	}
 	if c.Env != EnvDevelopment && !c.Auth.Enabled {
 		return fmt.Errorf("AUTH_ENABLED: must be true outside development")

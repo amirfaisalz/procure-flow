@@ -1,15 +1,15 @@
-package memory_test
+package testsupport_test
 
 import (
 	"testing"
 
 	"github.com/amirfaisalz/procure-flow/internal/domain/procurement"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/repositorytest"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 )
 
 func TestProcurementRepositoryContract(t *testing.T) {
 	repositorytest.Run(t, func(t *testing.T) procurement.Repository {
-		return memory.NewProcurementRepository()
+		return testsupport.NewProcurementRepository()
 	})
 }

@@ -10,8 +10,8 @@ import (
 
 	authapp "github.com/amirfaisalz/procure-flow/internal/application/auth"
 	"github.com/amirfaisalz/procure-flow/internal/domain/user"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/platform/password"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 )
 
 var sessionExpiry = time.Date(2026, time.November, 1, 17, 0, 0, 0, time.UTC)
@@ -39,7 +39,7 @@ func (f *fakeIssuer) Issue(
 	return "token-" + subject, sessionExpiry, nil
 }
 
-func seedAccount(t *testing.T, repo *memory.UserRepository, email, plain string, active bool, roles ...string) user.User {
+func seedAccount(t *testing.T, repo *testsupport.UserRepository, email, plain string, active bool, roles ...string) user.User {
 	t.Helper()
 
 	hash, err := password.New(bcrypt.MinCost).Hash(plain)
@@ -65,7 +65,7 @@ func seedAccount(t *testing.T, repo *memory.UserRepository, email, plain string,
 }
 
 func TestLoginIssuesSession(t *testing.T) {
-	repo := memory.NewUserRepository()
+	repo := testsupport.NewUserRepository()
 	account := seedAccount(t, repo, "Approver@Procure.Local", "correct-horse", true, "approver")
 
 	issuer := &fakeIssuer{}
@@ -97,7 +97,7 @@ func TestLoginIssuesSession(t *testing.T) {
 }
 
 func TestLoginRejectsBadCredentials(t *testing.T) {
-	repo := memory.NewUserRepository()
+	repo := testsupport.NewUserRepository()
 	seedAccount(t, repo, "requester@procure.local", "correct-horse", true, "requester")
 
 	service := authapp.NewService(repo, password.New(bcrypt.MinCost), &fakeIssuer{}, time.Hour)
@@ -122,7 +122,7 @@ func TestLoginRejectsBadCredentials(t *testing.T) {
 }
 
 func TestLoginRejectsInactiveAccount(t *testing.T) {
-	repo := memory.NewUserRepository()
+	repo := testsupport.NewUserRepository()
 	seedAccount(t, repo, "disabled@procure.local", "correct-horse", false, "viewer")
 
 	service := authapp.NewService(repo, password.New(bcrypt.MinCost), &fakeIssuer{}, time.Hour)
@@ -154,7 +154,7 @@ func TestLoginPropagatesRepositoryFailure(t *testing.T) {
 }
 
 func TestLoginFailsWhenIssuerFails(t *testing.T) {
-	repo := memory.NewUserRepository()
+	repo := testsupport.NewUserRepository()
 	seedAccount(t, repo, "admin@procure.local", "correct-horse", true, "admin")
 
 	issuer := &fakeIssuer{err: errors.New("signing key unavailable")}
@@ -166,7 +166,7 @@ func TestLoginFailsWhenIssuerFails(t *testing.T) {
 }
 
 func TestDefaultSessionTTL(t *testing.T) {
-	service := authapp.NewService(memory.NewUserRepository(), password.New(bcrypt.MinCost), &fakeIssuer{}, 0)
+	service := authapp.NewService(testsupport.NewUserRepository(), password.New(bcrypt.MinCost), &fakeIssuer{}, 0)
 	if service.TTL() != authapp.DefaultSessionTTL {
 		t.Errorf("TTL() = %v, want %v", service.TTL(), authapp.DefaultSessionTTL)
 	}

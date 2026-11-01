@@ -13,7 +13,7 @@ import (
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/domain/idempotency"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/middleware"
 )
 
@@ -57,7 +57,7 @@ func serveIdempotent(t *testing.T, h http.Handler, body, key, actor string) *htt
 
 func TestIdempotencyPassesThroughWithoutKey(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	for i := 0; i < 2; i++ {
 		if rec := serveIdempotent(t, h, idempotentBody, "", "user_amir"); rec.Code != http.StatusCreated {
@@ -71,7 +71,7 @@ func TestIdempotencyPassesThroughWithoutKey(t *testing.T) {
 
 func TestIdempotencyReplaysStoredResponse(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	first := serveIdempotent(t, h, idempotentBody, "key-1", "user_amir")
 	if first.Code != http.StatusCreated {
@@ -101,7 +101,7 @@ func TestIdempotencyReplaysStoredResponse(t *testing.T) {
 
 func TestIdempotencyRejectsReusedKeyWithDifferentBody(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	if rec := serveIdempotent(t, h, idempotentBody, "key-1", "user_amir"); rec.Code != http.StatusCreated {
 		t.Fatalf("first status = %d, want 201", rec.Code)
@@ -126,7 +126,7 @@ func TestIdempotencyRejectsReusedKeyWithDifferentBody(t *testing.T) {
 }
 
 func TestIdempotencyReportsInProgress(t *testing.T) {
-	repo := memory.NewIdempotencyRepository()
+	repo := testsupport.NewIdempotencyRepository()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var calls int32
@@ -170,7 +170,7 @@ func TestIdempotencyReportsInProgress(t *testing.T) {
 
 func TestIdempotencyReleasesClaimOnServerError(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusInternalServerError))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusInternalServerError))
 
 	if rec := serveIdempotent(t, h, idempotentBody, "key-1", "user_amir"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
@@ -187,7 +187,7 @@ func TestIdempotencyReleasesClaimOnServerError(t *testing.T) {
 
 func TestIdempotencyKeepsClaimWhenCompletionFails(t *testing.T) {
 	var calls int32
-	repo := completeFailingRepository{Repository: memory.NewIdempotencyRepository()}
+	repo := completeFailingRepository{Repository: testsupport.NewIdempotencyRepository()}
 	h := middleware.Idempotency(repo, time.Hour, func() time.Time { return idempotentClock }, nil)(
 		idempotentHandler(&calls, http.StatusCreated),
 	)
@@ -218,7 +218,7 @@ func (completeFailingRepository) Complete(context.Context, string, string, int, 
 
 func TestIdempotencyIsScopedPerActor(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	serveIdempotent(t, h, idempotentBody, "shared-key", "user_amir")
 	serveIdempotent(t, h, idempotentBody, "shared-key", "user_budi")
@@ -229,7 +229,7 @@ func TestIdempotencyIsScopedPerActor(t *testing.T) {
 
 func TestIdempotencyRejectsInvalidKey(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	rec := serveIdempotent(t, h, idempotentBody, strings.Repeat("k", 256), "user_amir")
 	if rec.Code != http.StatusBadRequest {
@@ -242,7 +242,7 @@ func TestIdempotencyRejectsInvalidKey(t *testing.T) {
 
 func TestIdempotencyRejectsOversizedBody(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	body := strings.Repeat("a", (1<<20)+1)
 	rec := serveIdempotent(t, h, body, "key-1", "user_amir")
@@ -256,7 +256,7 @@ func TestIdempotencyRejectsOversizedBody(t *testing.T) {
 
 func TestIdempotencyFailsClosedWithoutActor(t *testing.T) {
 	var calls int32
-	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+	h := wrapIdempotent(testsupport.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/procurements", strings.NewReader(idempotentBody))
 	req.Header.Set("Idempotency-Key", "key-1")

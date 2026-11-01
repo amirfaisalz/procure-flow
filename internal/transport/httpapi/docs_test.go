@@ -10,7 +10,7 @@ import (
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
-	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
+	"github.com/amirfaisalz/procure-flow/internal/testsupport"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 )
@@ -18,7 +18,7 @@ import (
 func buildDocsRouter(t *testing.T, enabled bool) http.Handler {
 	t.Helper()
 
-	repo := memory.NewProcurementRepository()
+	repo := testsupport.NewProcurementRepository()
 	service := app.NewService(repo, &sequentialIDs{}, func() time.Time { return testNow })
 	health := handler.NewHealthWithOptional("test", map[string]handler.Check{"repository": repo.Ping}, nil)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))

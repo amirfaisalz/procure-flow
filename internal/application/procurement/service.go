@@ -33,8 +33,8 @@ type IDGenerator interface {
 }
 
 // UnitOfWork runs a function inside a single storage transaction. When it is
-// nil, writes execute directly; this keeps the in-memory adapter usable while
-// PostgreSQL commits the aggregate and its audit events atomically.
+// nil (tests, mainly), writes execute directly; PostgreSQL uses it to commit the
+// aggregate and its audit events atomically.
 type UnitOfWork interface {
 	WithinTx(ctx context.Context, fn func(context.Context) error) error
 }
