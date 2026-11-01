@@ -15,7 +15,8 @@ PostgreSQL, Redis, and RabbitMQ are used where they earn their keep.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [Quick start](#quick-start) · [Walkthrough](#walkthrough) · [API](#api) ·
-[Architecture](docs/architecture.md) · [Configuration](docs/configuration.md) ·
+[User journey](docs/user-journey.md) · [Architecture](docs/architecture.md) ·
+[Technology](docs/technology.md) · [Configuration](docs/configuration.md) ·
 [Contributing](#contributing)
 
 </div>
@@ -63,6 +64,7 @@ enough to read in an afternoon, complete enough to deploy.
 - [Operations](#operations)
 - [Development](#development)
 - [Project layout](#project-layout)
+- [Documentation](#documentation)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -537,6 +539,17 @@ docs/                          architecture and configuration references
 migrations/                    embedded, reversible SQL migrations
 scripts/                       operational scripts
 ```
+
+## Documentation
+
+- [User journeys](docs/user-journey.md) — personas, the draft-to-approved path,
+  rejection, cancellation, retries, and what each step writes.
+- [Architecture](docs/architecture.md) — layers, transaction boundaries, and
+  failure modes.
+- [Technology](docs/technology.md) — what PostgreSQL, Redis, RabbitMQ, JWT, and
+  the rest are doing here, and why.
+- [Configuration](docs/configuration.md) — every environment variable and
+  validation rule.
 
 ## Roadmap
 

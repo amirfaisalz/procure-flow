@@ -1,5 +1,8 @@
 # Architecture
 
+See also: [user journeys](user-journey.md) for the request-level view and
+[technology](technology.md) for why each component is here.
+
 ## Goals
 
 - Keep business rules independent of HTTP and storage.

@@ -1,5 +1,8 @@
 # Configuration
 
+See also: [user journeys](user-journey.md), [architecture](architecture.md), and
+[technology](technology.md).
+
 `procure-flow` is configured exclusively through environment variables. `.env`
 files are **not** loaded automatically — load them in your shell or pass them to
 your process manager.
