@@ -89,5 +89,22 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the development env loader
+        run: |
+          tmp="$(mktemp)"
+          printf 'APP_ENV=development\nFOO=from-file\nQUOTED="a b"\n' > "$tmp"
+          FOO=from-env ENV_FILE="$tmp" ./scripts/load-env.sh sh -c \
+            'test "$FOO" = from-env && test "$APP_ENV" = development && test "$QUOTED" = "a b"'
+          ENV_FILE="$tmp" ./scripts/load-env.sh sh -c \
+            'test "$FOO" = from-file && test "$QUOTED" = "a b"'
+
+      - name: Verify the JWT secret generator
+        run: |
+          tmp="$(mktemp)"
+          printf 'APP_ENV=development\n# AUTH_JWT_SECRET=\nDATABASE_URL=postgres://localhost/x\n' > "$tmp"
+          ENV_FILE="$tmp" ./scripts/gen-jwt-secret.sh
+          grep -Eq '^AUTH_JWT_SECRET=[0-9a-f]{64}$' "$tmp"
+          test "$(grep -c 'AUTH_JWT_SECRET=' "$tmp")" = 1
+
       - name: Build container image
         run: docker build -t procure-flow:ci .

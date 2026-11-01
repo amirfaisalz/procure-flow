@@ -200,17 +200,24 @@ reference with an in-browser request client.
 
 ## Running locally
 
-PostgreSQL is the only storage backend; the API refuses to start without
-`DATABASE_URL`. Start the services, then run the API and seed the login accounts:
+PostgreSQL is the only storage backend, so the API refuses to start without
+`DATABASE_URL`. Copy the example file, start the services, then run the API and
+seed the login accounts:
 
 ```bash
+cp .env.example .env    # first time only
 make deps-up            # PostgreSQL :55432 · Redis :56379 · RabbitMQ :5672
-
-export DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'
-make run                # applies embedded migrations on startup
+make run                # loads .env; applies embedded migrations on startup
 make seed               # creates the four demo login accounts
 make worker             # in a second terminal
 ```
+
+`make run`, `make seed`, `make worker`, and `make migrate-*` read `.env`
+automatically through `scripts/load-env.sh`. Variables already exported in your
+shell win over the file, and `ENV_FILE=path make run` selects a different file.
+The binary itself never reads `.env`: production supplies the same variables
+from its platform, as described in
+[configuration](docs/configuration.md#where-the-values-come-from).
 
 Authentication is on by default, so log in with `admin@procure.local` /
 `demo-password-123` before calling `/api/v1`:
@@ -229,10 +236,13 @@ The worker logs one notification per lifecycle event and simulates the ERP sync
 unless webhooks are configured. Migrations can also run as a separate step:
 
 ```bash
-make migrate-up     DATABASE_URL='postgres://...'
-make migrate-status DATABASE_URL='postgres://...'
-go run ./cmd/migrate down
+make migrate-up
+make migrate-status
+make migrate-down
 ```
+
+The binaries never read `.env` themselves. Running them directly (`go run
+./cmd/api`) requires the variables to be exported in your shell.
 
 ## API
 
@@ -303,6 +313,10 @@ The cookie is `HttpOnly`, `SameSite=Lax`, scoped to `/api/v1`, and `Secure`
 outside development. The response body carries the account and expiry only —
 never the token. `GET /api/v1/auth/me` echoes the verified claims, and
 `POST /api/v1/auth/logout` clears the cookie.
+
+Development without `AUTH_JWT_SECRET` generates an ephemeral key, so sessions
+reset on every restart. Run `make jwt-secret` once to write a stable 32-byte
+secret into `.env`.
 
 Accounts live in the `users` table with bcrypt hashes. `make seed` (or the
 compose `seed` service) creates four of them:
@@ -377,7 +391,8 @@ is logged — availability wins over strictness here, deliberately.
 
 ## Configuration
 
-Environment variables only; `.env` is not read automatically. The essentials:
+Configuration comes from the process environment. Local `make` targets load
+`.env` for you; the binary itself never reads it. The essentials:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -385,7 +400,7 @@ Environment variables only; `.env` is not read automatically. The essentials:
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `DATABASE_URL` | *(required)* | PostgreSQL connection URL |
 | `AUTH_ENABLED` | `true` | Every `/api/v1` route needs a login; development may opt out |
-| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | Credentials; development generates a temporary secret |
+| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | Credentials; `make jwt-secret` writes a stable development secret |
 | `AUTH_SESSION_TTL` | `8h` | Login cookie lifetime |
 | `AUTH_COOKIE_SECURE` | `true` outside development | Keep `true` behind TLS |
 | `SEED_PASSWORD` | demo default outside production | Password for seeded accounts |

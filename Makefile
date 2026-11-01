@@ -6,6 +6,9 @@ LDFLAGS     := -s -w -X main.version=$(VERSION)
 DOCKER_IMAGE ?= procure-flow:local
 BASE_URL    ?= http://localhost:8080
 COMPOSE     := docker compose -f deployments/docker-compose.yml
+# Local env file loaded by the development targets. Already-exported variables
+# win over the file; override the path with ENV_FILE=...
+ENV_FILE    ?= .env
 TEST_DATABASE_URL ?= postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable
 TEST_REDIS_URL ?= redis://127.0.0.1:56379/0
 TEST_RABBITMQ_URL ?= amqp://guest:guest@127.0.0.1:5672/
@@ -17,12 +20,12 @@ help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: run
-run: ## Run the API locally
-	go run $(CMD)
+run: ## Run the API locally (loads .env and prints the endpoint)
+	@ENV_FILE=$(ENV_FILE) ./scripts/load-env.sh ./scripts/dev-api.sh
 
 .PHONY: worker
-worker: ## Run the async worker locally (requires RABBITMQ_URL)
-	go run ./cmd/worker
+worker: ## Run the async worker locally (loads .env; requires RABBITMQ_URL)
+	@ENV_FILE=$(ENV_FILE) ./scripts/load-env.sh go run ./cmd/worker
 
 .PHONY: build
 build: ## Build the API binary into bin/
@@ -94,19 +97,24 @@ db-reset: ## Destroy the local database volume and recreate it
 	$(COMPOSE) up -d db
 
 .PHONY: migrate-up
-migrate-up: ## Apply pending migrations (DATABASE_URL=...)
-	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required" && exit 1)
-	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate up
+migrate-up: ## Apply pending migrations (loads .env)
+	@ENV_FILE=$(ENV_FILE) ./scripts/load-env.sh go run ./cmd/migrate up
 
 .PHONY: migrate-status
-migrate-status: ## Show migration status (DATABASE_URL=...)
-	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required" && exit 1)
-	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate status
+migrate-status: ## Show migration status (loads .env)
+	@ENV_FILE=$(ENV_FILE) ./scripts/load-env.sh go run ./cmd/migrate status
+
+.PHONY: migrate-down
+migrate-down: ## Roll back the most recent migration (loads .env)
+	@ENV_FILE=$(ENV_FILE) ./scripts/load-env.sh go run ./cmd/migrate down
 
 .PHONY: seed
-seed: ## Seed demo login accounts (DATABASE_URL=...; SEED_PASSWORD=...)
-	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required" && exit 1)
-	DATABASE_URL="$(DATABASE_URL)" SEED_PASSWORD="$(SEED_PASSWORD)" APP_ENV="$(APP_ENV)" go run ./cmd/seed
+seed: ## Seed demo login accounts (loads .env; SEED_PASSWORD=...)
+	@ENV_FILE=$(ENV_FILE) ./scripts/load-env.sh go run ./cmd/seed
+
+.PHONY: jwt-secret
+jwt-secret: ## Generate AUTH_JWT_SECRET and write it to .env
+	@ENV_FILE=$(ENV_FILE) ./scripts/gen-jwt-secret.sh
 
 .PHONY: docker-build
 docker-build: ## Build the container image

@@ -3,19 +3,46 @@
 See also: [user journeys](user-journey.md), [architecture](architecture.md), and
 [technology](technology.md).
 
-`procure-flow` is configured exclusively through environment variables. `.env`
-files are **not** loaded automatically — load them in your shell or pass them to
-your process manager.
+`procure-flow` reads its configuration exclusively from environment variables.
+The development targets load a local `.env` for you through
+[`scripts/load-env.sh`](../scripts/load-env.sh); the binaries themselves never
+read the file.
 
 ```bash
 cp .env.example .env
-set -a && . ./.env && set +a
+make deps-up
 make run
 ```
+
+`make run`, `make seed`, `make worker`, and `make migrate-*` load `.env`.
+Already-exported variables win over the file, so `DATABASE_URL=... make seed`
+works as expected, and `ENV_FILE=path make run` selects another file. Running a
+binary directly (`go run ./cmd/api`) requires the variables to be exported.
 
 [`../.env.example`](../.env.example) and
 [`../configs/config.example.env`](../configs/config.example.env) mirror the
 tables below with inline comments.
+
+## Where the values come from
+
+Nothing in the image contains configuration. At runtime the platform injects
+the variables into the process environment:
+
+| Deployment | Injection |
+| --- | --- |
+| Docker Compose | `environment:` or `env_file:` |
+| `docker run` | `--env-file` or `-e` |
+| systemd | `EnvironmentFile=` (mode `600`, owner `root`) |
+| Kubernetes | `envFrom` a `Secret` or `ConfigMap` |
+| ECS, Fly.io, Railway | task definition / platform secrets |
+
+The values themselves are provisioned by the operator: a database password, a
+generated `AUTH_JWT_SECRET` (`openssl rand -hex 32`), and the internal service
+URLs. Staging and production refuse to start without `DATABASE_URL` and
+`AUTH_JWT_SECRET`, and reject `AUTH_ENABLED=false`, so a missing setting fails
+fast instead of silently running with development defaults. Note that the
+Compose `.env` used for `${...}` interpolation is a different mechanism from
+`env_file:`, which is what the container sees.
 
 ## Application
 
@@ -60,7 +87,7 @@ tables below with inline comments.
 | --- | --- | --- |
 | `AUTH_ENABLED` | `true` | Require a login for every `/api/v1` route |
 | `AUTH_API_KEYS` | *(empty)* | JSON array of static API keys |
-| `AUTH_JWT_SECRET` | *(generated in development)* | HS256 secret, at least 32 characters |
+| `AUTH_JWT_SECRET` | *(ephemeral in development)* | HS256 secret, at least 32 characters; `make jwt-secret` writes a stable one |
 | `AUTH_JWT_ISSUER` | `procure-flow` | Required JWT `iss` |
 | `AUTH_JWT_AUDIENCE` | `procure-flow-api` | Required JWT `aud` |
 | `AUTH_JWT_LEEWAY` | `30s` | Clock-skew tolerance |
@@ -71,7 +98,9 @@ tables below with inline comments.
 Setting `AUTH_JWT_SECRET` enables `POST /api/v1/auth/login`, which signs the JWT
 with the same key the bearer authenticator verifies. Without it, login and
 logout are not registered and only API keys work; `GET /api/v1/auth/me` still
-describes the caller.
+describes the caller. Development substitutes an ephemeral key so `make run`
+works out of the box, but sessions then reset on restart. `make jwt-secret`
+generates a 32-byte secret and writes it into `.env` (or `ENV_FILE`).
 
 ## Seeding
 
