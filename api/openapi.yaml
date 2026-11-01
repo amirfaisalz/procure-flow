@@ -21,6 +21,7 @@ security:
 tags:
   - name: Health
   - name: Procurements
+  - name: Documentation
 paths:
   /healthz:
     get:
@@ -47,7 +48,9 @@ paths:
       security: []
       responses:
         "200":
-          description: All dependencies are usable
+          description: >-
+            Required dependencies are healthy. Optional dependencies may be
+            unavailable, in which case `status` is `degraded`.
           content:
             application/json:
               schema:
@@ -57,7 +60,7 @@ paths:
                   data:
                     $ref: "#/components/schemas/Readiness"
         "503":
-          description: One or more dependencies are unavailable
+          description: A required dependency is unavailable
           content:
             application/json:
               schema:
@@ -343,7 +346,8 @@ paths:
       summary: Prometheus metrics
       description: |
         Prometheus text exposition format. This endpoint is public, like the
-        health probes; restrict it at the network layer in production.
+        health probes; restrict it at the network layer in production. It is
+        only registered when `METRICS_ENABLED` is true (the default).
       operationId: getMetrics
       security: []
       responses:
@@ -351,6 +355,36 @@ paths:
           description: Metrics in Prometheus text format
           content:
             text/plain:
+              schema:
+                type: string
+  /docs:
+    get:
+      tags: [Documentation]
+      summary: Interactive API reference
+      description: |
+        Scalar API reference for this contract. Public like the health probes;
+        only registered when `DOCS_ENABLED` is true.
+      operationId: getDocs
+      security: []
+      responses:
+        "200":
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+  /openapi.yaml:
+    get:
+      tags: [Documentation]
+      summary: OpenAPI contract
+      description: The embedded OpenAPI 3.1 document.
+      operationId: getOpenAPISpec
+      security: []
+      responses:
+        "200":
+          description: OpenAPI document
+          content:
+            application/yaml:
               schema:
                 type: string
 components:
@@ -542,12 +576,16 @@ components:
       properties:
         status:
           type: string
-          enum: [ready, not_ready]
+          enum: [ready, degraded, not_ready]
+          description: >-
+            `degraded` means an optional dependency (Redis or RabbitMQ) is
+            unavailable but the API still serves traffic; `not_ready` returns
+            HTTP 503 and means a required dependency (the database) failed.
         checks:
           type: object
           additionalProperties:
             type: string
-            enum: [ok, error]
+            enum: [ok, unavailable, error]
     Problem:
       type: object
       required: [type, title, status]

@@ -42,6 +42,10 @@ type fakeRepo struct {
 	updateExpected int
 	lastFilter     domainproc.ListFilter
 	listResult     domainproc.ListResult
+
+	// afterGet runs after a successful GetByID, letting tests simulate a
+	// mutation that commits while a read is in flight.
+	afterGet func()
 }
 
 func (f *fakeRepo) Create(_ context.Context, p domainproc.Procurement) error {
@@ -67,6 +71,9 @@ func (f *fakeRepo) GetByID(_ context.Context, id string) (domainproc.Procurement
 	}
 	if !f.has || f.item.ID != id {
 		return domainproc.Procurement{}, domain.ErrNotFound
+	}
+	if f.afterGet != nil {
+		f.afterGet()
 	}
 	return f.item, nil
 }

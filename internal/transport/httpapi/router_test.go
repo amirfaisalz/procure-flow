@@ -39,7 +39,7 @@ func buildRouter(t *testing.T, repo *memory.ProcurementRepository, checks map[st
 	t.Helper()
 
 	service := app.NewService(repo, &sequentialIDs{}, func() time.Time { return testNow })
-	health := handler.NewHealth("test", checks)
+	health := handler.NewHealthWithOptional("test", checks, nil)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	cfg := config.Config{
 		Env:      config.EnvDevelopment,
@@ -473,6 +473,30 @@ func TestReadyFailure(t *testing.T) {
 	ready := decodeRaw[readyBody](t, decodeBody[envelope](t, rec).Data)
 	if ready.Status != "not_ready" || ready.Checks["database"] != "error" {
 		t.Errorf("readyz = %+v, want not_ready with database error", ready)
+	}
+}
+
+func TestReadyDegradesOnOptionalDependency(t *testing.T) {
+	health := handler.NewHealthWithOptional("test",
+		map[string]handler.Check{"repository": func(context.Context) error { return nil }},
+		map[string]handler.Check{"redis": func(context.Context) error { return errors.New("redis is down") }},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	health.Ready(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("readyz status = %d, want 200 when only an optional check fails", rec.Code)
+	}
+	var body struct {
+		Data readyBody `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode readyz: %v", err)
+	}
+	if body.Data.Status != "degraded" || body.Data.Checks["redis"] != "unavailable" {
+		t.Errorf("readyz = %+v, want degraded with redis unavailable", body.Data)
 	}
 }
 

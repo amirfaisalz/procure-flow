@@ -45,7 +45,7 @@ func buildAuthenticatedRouter(
 		func() time.Time { return testNow },
 		app.WithAudit(auditRepo, nil),
 	)
-	health := handler.NewHealth("test", map[string]handler.Check{"repository": repo.Ping})
+	health := handler.NewHealthWithOptional("test", map[string]handler.Check{"repository": repo.Ping}, nil)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 
 	authenticator := auth.NewAPIKeyAuthenticator([]auth.APIKey{
@@ -239,6 +239,24 @@ func TestRouterRateLimit(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("Retry-After header is missing")
+	}
+}
+
+func TestRouterRateLimitThrottlesUnauthenticatedRequests(t *testing.T) {
+	repo := memory.NewProcurementRepository()
+	router := buildAuthenticatedRouter(t, repo, memory.NewAuditRepository(), func(deps *httpapi.Dependencies) {
+		deps.Config.RateLimit = config.RateLimit{Enabled: true, RequestsPerSecond: 1, Burst: 1}
+		deps.RateLimiter = ratelimit.New(1, 1)
+	})
+
+	if rec := doRequestWithHeaders(router, http.MethodGet, "/api/v1/procurements", "", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("first status = %d, want 401; body = %s", rec.Code, rec.Body.String())
+	}
+	// The failed attempt consumed the per-IP bucket, so credential guessing is
+	// throttled instead of returning unlimited 401s.
+	rec := doRequestWithHeaders(router, http.MethodGet, "/api/v1/procurements", "", "", nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429; body = %s", rec.Code, rec.Body.String())
 	}
 }
 

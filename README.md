@@ -75,6 +75,10 @@ curl -s http://localhost:8080/healthz
 curl -s http://localhost:8080/readyz
 ```
 
+`/readyz` returns 503 only when a required dependency (the database) fails.
+Redis and RabbitMQ are reported in `checks`; when one is unavailable the status
+is `degraded` but the instance keeps receiving traffic.
+
 ### PostgreSQL
 
 ```bash
@@ -188,14 +192,15 @@ curl -s http://localhost:8080/api/v1/procurements \
 | Role | Permissions |
 | --- | --- |
 | `admin` | Everything, including cross-department approval and ownership overrides |
-| `approver` | Approve or reject submitted requests in the actor's department |
+| `approver` | Approve or reject submitted requests in the actor's department, but never their own |
 | `requester` | Create requests; submit and cancel requests they own |
 | `viewer` | Read requests and audit trails |
 
 Ownership is recorded as `requester_id`, derived from the token subject rather
-than the request body. Authorization fails closed: a missing actor is treated
-as forbidden. When `AUTH_ENABLED=false`, the router injects a local admin actor
-so development keeps working without credentials.
+than the request body. Approvers cannot approve their own requests unless they
+also hold the `admin` role. Authorization fails closed: a missing actor is
+treated as forbidden. When `AUTH_ENABLED=false`, the router injects a local
+admin actor so development keeps working without credentials.
 
 ### Audit trail
 
@@ -231,11 +236,12 @@ curl -s -X POST http://localhost:8080/api/v1/procurements \
 
 ### Rate limiting
 
-Every `/api/v1` route is limited per caller: the authenticated subject when
-present, otherwise the remote IP address. The token bucket allows
-`RATE_LIMIT_BURST` immediate requests and refills at `RATE_LIMIT_RPS`. Responses
-carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; an exhausted bucket
-returns `429 RATE_LIMITED` with `Retry-After` in seconds.
+Every `/api/v1` route is limited per caller. Authenticated requests consume the
+subject's bucket; failed authentication consumes the remote IP's bucket before
+the 401 is written, so credential guessing is throttled too. The token bucket
+allows `RATE_LIMIT_BURST` immediate requests and refills at `RATE_LIMIT_RPS`.
+Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; an exhausted
+bucket returns `429 RATE_LIMITED` with `Retry-After` in seconds.
 
 With `RATE_LIMIT_STORE=redis` (or `auto` plus `REDIS_URL`) the bucket lives in
 Redis and is updated by an atomic Lua script, so all API replicas share one
@@ -247,9 +253,10 @@ failure is logged.
 
 `GET /api/v1/procurements/{id}` uses cache-aside: a miss loads the aggregate
 from PostgreSQL and stores it as JSON in Redis for `CACHE_TTL`; create, submit,
-approve, reject, and cancel delete the key after the transaction commits. Cache
-errors are treated as misses and never fail a request, and a short TTL bounds
-staleness if an invalidation races with a concurrent read.
+approve, reject, and cancel invalidate the key after the transaction commits.
+Every entry carries a generation marker: invalidation advances it, and a read
+that observed the old generation cannot repopulate the cache with a stale
+aggregate. Cache errors are treated as misses and never fail a request.
 
 Keys are versioned (`procurement:v1:<id>`) so an incompatible aggregate change
 can be rolled out by bumping the prefix. List results are not cached because

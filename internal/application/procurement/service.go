@@ -172,10 +172,20 @@ func (s *Service) Get(ctx context.Context, id string) (domainproc.Procurement, e
 		return domainproc.Procurement{}, err
 	}
 
+	key := procurementCacheKey(id)
+	var generation string
+	cacheable := false
 	if s.cache != nil {
 		var cached domainproc.Procurement
-		if ok, cacheErr := s.cache.Get(ctx, procurementCacheKey(id), &cached); cacheErr == nil && ok {
-			return cached, nil
+		found, gen, cacheErr := s.cache.Get(ctx, key, &cached)
+		if cacheErr == nil {
+			if found {
+				return cached, nil
+			}
+			// Remember the generation observed before the database read. A
+			// mutation that commits in the meantime advances it, and the
+			// conditional set below then refuses to cache the stale value.
+			generation, cacheable = gen, true
 		}
 	}
 
@@ -183,8 +193,8 @@ func (s *Service) Get(ctx context.Context, id string) (domainproc.Procurement, e
 	if err != nil {
 		return domainproc.Procurement{}, err
 	}
-	if s.cache != nil {
-		_ = s.cache.Set(ctx, procurementCacheKey(id), p, s.cacheTTL)
+	if cacheable {
+		_, _ = s.cache.SetIfGeneration(ctx, key, p, s.cacheTTL, generation)
 	}
 	return p, nil
 }
@@ -400,6 +410,11 @@ func canApprove(actor Actor, p domainproc.Procurement) bool {
 		return true
 	}
 	if !actor.HasRole(RoleApprover) {
+		return false
+	}
+	// Segregation of duties: a non-admin approver cannot approve a request they
+	// created themselves, even when the department matches.
+	if p.RequesterID != "" && p.RequesterID == actor.Subject {
 		return false
 	}
 	department := strings.TrimSpace(actor.Department)

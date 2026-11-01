@@ -34,9 +34,6 @@ func TestAuthenticationInjectsActor(t *testing.T) {
 		if actor.Subject != "user_amir" || !actor.HasRole(app.RoleRequester) || actor.Department != "Engineering" {
 			t.Errorf("actor = %+v, want the mapped principal", actor)
 		}
-		if principal, ok := auth.FromContext(r.Context()); !ok || principal.Subject != "user_amir" {
-			t.Errorf("principal = %+v, want it in the context", principal)
-		}
 		w.WriteHeader(http.StatusOK)
 	}))
 

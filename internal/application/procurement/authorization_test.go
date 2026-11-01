@@ -201,10 +201,11 @@ func TestServiceSubmitOwnership(t *testing.T) {
 
 func TestServiceApproveDepartmentScope(t *testing.T) {
 	tests := []struct {
-		name       string
-		actor      app.Actor
-		department string
-		wantErr    bool
+		name        string
+		actor       app.Actor
+		department  string
+		requesterID string
+		wantErr     bool
 	}{
 		{
 			name:       "matching department",
@@ -235,16 +236,30 @@ func TestServiceApproveDepartmentScope(t *testing.T) {
 			wantErr:    true,
 		},
 		{
+			name:        "approver cannot approve own request",
+			actor:       app.Actor{Subject: "user_fin", Name: "Fin", Roles: []string{app.RoleApprover, app.RoleRequester}, Department: "Finance"},
+			department:  "Finance",
+			requesterID: "user_fin",
+			wantErr:     true,
+		},
+		{
 			name:       "admin override",
 			actor:      app.Actor{Subject: "user_admin", Name: "Admin", Roles: []string{app.RoleAdmin}},
 			department: "Finance",
+		},
+		{
+			name:        "admin can approve own request",
+			actor:       app.Actor{Subject: "user_admin", Name: "Admin", Roles: []string{app.RoleAdmin}},
+			department:  "Finance",
+			requesterID: "user_admin",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			repo := &fakeRepo{has: true, item: domainproc.Procurement{
-				ID: "prc_1", Status: domainproc.StatusSubmitted, Version: 2, Department: tt.department,
+				ID: "prc_1", Status: domainproc.StatusSubmitted, Version: 2,
+				Department: tt.department, RequesterID: tt.requesterID,
 			}}
 			svc := newService(repo)
 			ctx := app.WithActor(context.Background(), tt.actor)

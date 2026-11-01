@@ -20,7 +20,7 @@ func buildDocsRouter(t *testing.T, enabled bool) http.Handler {
 
 	repo := memory.NewProcurementRepository()
 	service := app.NewService(repo, &sequentialIDs{}, func() time.Time { return testNow })
-	health := handler.NewHealth("test", map[string]handler.Check{"repository": repo.Ping})
+	health := handler.NewHealthWithOptional("test", map[string]handler.Check{"repository": repo.Ping}, nil)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	cfg := config.Config{
 		Env:  config.EnvDevelopment,

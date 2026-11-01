@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -70,16 +69,3 @@ func (p Principal) HasRole(role Role) bool {
 
 // ErrUnauthenticated is returned when a request carries no valid credentials.
 var ErrUnauthenticated = errors.New("unauthenticated")
-
-type principalKey struct{}
-
-// WithPrincipal stores the authenticated principal in ctx.
-func WithPrincipal(ctx context.Context, principal Principal) context.Context {
-	return context.WithValue(ctx, principalKey{}, principal)
-}
-
-// FromContext returns the principal stored by the authentication middleware.
-func FromContext(ctx context.Context) (Principal, bool) {
-	principal, ok := ctx.Value(principalKey{}).(Principal)
-	return principal, ok
-}

@@ -73,19 +73,27 @@ func NewRouter(deps Dependencies) http.Handler {
 	var apiHandler http.Handler = &fallback{mux: apiMux}
 
 	apiMiddlewares := make([]middleware.Middleware, 0, 2)
+	rateLimiting := deps.Config.RateLimit.Enabled && deps.RateLimiter != nil
 	if deps.Config.Auth.Enabled {
 		authenticator := deps.Authenticator
 		if authenticator == nil {
 			// Fail closed: a missing authenticator rejects every request.
 			authenticator = auth.Chain{}
 		}
-		apiMiddlewares = append(apiMiddlewares, middleware.Authentication(authenticator, logger))
+		if rateLimiting {
+			// Authenticate and limit together so anonymous traffic is throttled
+			// as well; see middleware.AuthenticatedRateLimit.
+			apiMiddlewares = append(apiMiddlewares,
+				middleware.AuthenticatedRateLimit(authenticator, deps.RateLimiter, logger))
+		} else {
+			apiMiddlewares = append(apiMiddlewares, middleware.Authentication(authenticator, logger))
+		}
 	} else {
 		logger.Warn("authentication is disabled; injecting a local admin actor")
 		apiMiddlewares = append(apiMiddlewares, middleware.InjectActor(localActor))
-	}
-	if deps.Config.RateLimit.Enabled && deps.RateLimiter != nil {
-		apiMiddlewares = append(apiMiddlewares, middleware.RateLimit(deps.RateLimiter, logger))
+		if rateLimiting {
+			apiMiddlewares = append(apiMiddlewares, middleware.RateLimit(deps.RateLimiter, logger))
+		}
 	}
 	apiHandler = middleware.Chain(apiHandler, apiMiddlewares...)
 

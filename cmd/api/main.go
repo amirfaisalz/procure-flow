@@ -64,14 +64,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Only the repository is required for readiness. Redis and RabbitMQ are
+	// optimizations: report them, but do not let their outage pull every
+	// replica out of the load balancer.
 	checks := map[string]handler.Check{
 		"repository": store.ping,
 	}
+	optionalChecks := map[string]handler.Check{}
 	serviceOptions := []app.Option{
 		app.WithAudit(store.audit, store.uow),
 	}
 
-	redisClient, err := openRedis(cfg, logger, checks)
+	redisClient, err := openRedis(cfg, logger, optionalChecks)
 	if err != nil {
 		return err
 	}
@@ -94,7 +98,7 @@ func run() error {
 
 		publisher = rabbitmq.NewPublisher(cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
 		defer func() { _ = publisher.Close() }()
-		checks["rabbitmq"] = publisher.Healthy
+		optionalChecks["rabbitmq"] = publisher.Healthy
 
 		connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := publisher.Connect(connectCtx); err != nil {
@@ -114,7 +118,7 @@ func run() error {
 	}
 
 	service := app.NewService(store.procurements, id.NewGenerator(), nil, serviceOptions...)
-	health := handler.NewHealth(version, checks)
+	health := handler.NewHealthWithOptional(version, checks, optionalChecks)
 
 	var authenticator auth.Authenticator
 	if cfg.Auth.Enabled {
@@ -168,10 +172,10 @@ func run() error {
 	return runErr
 }
 
-// openRedis creates the shared Redis client and registers its readiness check.
-// A failed first ping is not fatal: the client reconnects on demand and the
-// rate limiter falls back to its in-process bucket meanwhile.
-func openRedis(cfg config.Config, logger *slog.Logger, checks map[string]handler.Check) (*goredis.Client, error) {
+// openRedis creates the shared Redis client and registers its optional health
+// check. A failed first ping is not fatal: the client reconnects on demand and
+// the rate limiter falls back to its in-process bucket meanwhile.
+func openRedis(cfg config.Config, logger *slog.Logger, optional map[string]handler.Check) (*goredis.Client, error) {
 	if cfg.Redis.URL == "" {
 		return nil, nil
 	}
@@ -180,7 +184,7 @@ func openRedis(cfg config.Config, logger *slog.Logger, checks map[string]handler
 	if err != nil {
 		return nil, fmt.Errorf("connect to redis: %w", err)
 	}
-	checks["redis"] = func(ctx context.Context) error {
+	optional["redis"] = func(ctx context.Context) error {
 		return client.Ping(ctx).Err()
 	}
 

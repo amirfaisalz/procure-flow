@@ -3,6 +3,7 @@ package procurement_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,9 +12,12 @@ import (
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 )
 
-// fakeCache stores aggregates in memory and records calls.
+// fakeCache stores aggregates in memory and records calls. It mirrors the
+// generation fence of the Redis adapter.
 type fakeCache struct {
 	items       map[string]domainproc.Procurement
+	generations map[string]string
+	nextGen     int
 	getErr      error
 	setErr      error
 	deleteErr   error
@@ -24,38 +28,44 @@ type fakeCache struct {
 }
 
 func newFakeCache() *fakeCache {
-	return &fakeCache{items: make(map[string]domainproc.Procurement)}
+	return &fakeCache{
+		items:       make(map[string]domainproc.Procurement),
+		generations: make(map[string]string),
+	}
 }
 
-func (f *fakeCache) Get(_ context.Context, key string, dst any) (bool, error) {
+func (f *fakeCache) Get(_ context.Context, key string, dst any) (bool, string, error) {
 	f.getCalls++
 	if f.getErr != nil {
-		return false, f.getErr
+		return false, "", f.getErr
 	}
 	item, ok := f.items[key]
 	if !ok {
-		return false, nil
+		return false, f.generations[key], nil
 	}
 	ptr, ok := dst.(*domainproc.Procurement)
 	if !ok {
-		return false, errors.New("fakeCache: unexpected destination type")
+		return false, f.generations[key], errors.New("fakeCache: unexpected destination type")
 	}
 	*ptr = item
-	return true, nil
+	return true, f.generations[key], nil
 }
 
-func (f *fakeCache) Set(_ context.Context, key string, value any, ttl time.Duration) error {
+func (f *fakeCache) SetIfGeneration(_ context.Context, key string, value any, ttl time.Duration, generation string) (bool, error) {
 	f.setCalls++
 	if f.setErr != nil {
-		return f.setErr
+		return false, f.setErr
+	}
+	if f.generations[key] != generation {
+		return false, nil
 	}
 	item, ok := value.(domainproc.Procurement)
 	if !ok {
-		return errors.New("fakeCache: unexpected value type")
+		return false, errors.New("fakeCache: unexpected value type")
 	}
 	f.items[key] = item
 	f.lastTTL = ttl
-	return nil
+	return true, nil
 }
 
 func (f *fakeCache) Delete(_ context.Context, key string) error {
@@ -64,6 +74,8 @@ func (f *fakeCache) Delete(_ context.Context, key string) error {
 		return f.deleteErr
 	}
 	delete(f.items, key)
+	f.nextGen++
+	f.generations[key] = fmt.Sprintf("gen-%d", f.nextGen)
 	return nil
 }
 
@@ -97,6 +109,29 @@ func TestServiceGetCachesAggregate(t *testing.T) {
 	}
 	if repo.getCalls != 1 {
 		t.Errorf("repository GetByID calls = %d, want 1 (second read should hit cache)", repo.getCalls)
+	}
+}
+
+func TestServiceGetDoesNotCacheAfterConcurrentInvalidation(t *testing.T) {
+	repo := &fakeRepo{item: sampleProcurement(), has: true}
+	cache := newFakeCache()
+	key := procurementCacheKeyForTest("prc_1")
+
+	// Simulate a mutation committing (and invalidating) between the cache miss
+	// and the database read.
+	repo.afterGet = func() {
+		_ = cache.Delete(context.Background(), key)
+	}
+
+	svc := newCachedService(repo, cache)
+	if _, err := svc.Get(adminCtx(), "prc_1"); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if cache.setCalls != 1 {
+		t.Errorf("cache set calls = %d, want 1 attempt", cache.setCalls)
+	}
+	if len(cache.items) != 0 {
+		t.Error("a stale aggregate was cached after the concurrent invalidation")
 	}
 }
 

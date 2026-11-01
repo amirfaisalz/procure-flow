@@ -117,8 +117,8 @@ The application policy fails closed: no actor means `domain.ErrForbidden`.
 | Create | `admin` or `requester` |
 | Get / List / Audit | any authenticated actor |
 | Submit | owner (`requester_id`) or `admin` |
-| Approve / Reject | `admin`, or `approver` whose department matches the request |
-| Cancel | owner or `admin` |
+| Approve / Reject | `admin`, or `approver` whose department matches the request; never the requester themselves |
+| Cancel | owner with the `requester` role, or `admin` |
 
 `requester_id` is derived from the token subject, never from client input.
 
@@ -155,9 +155,10 @@ atomically. Keys are never shared across actors.
 ## Rate limiting and observability
 
 `internal/platform/ratelimit` is a token bucket keyed by authenticated subject
-or remote IP. `internal/transport/httpapi/middleware.RateLimit` runs after
-authentication so the subject is available, emits `X-RateLimit-*` headers, and
-returns `429 RATE_LIMITED` with `Retry-After`.
+or remote IP. `middleware.AuthenticatedRateLimit` authenticates first and then
+consumes the subject's bucket; failed authentication consumes the IP's bucket
+before the 401 is written, so credential guessing is throttled. It emits
+`X-RateLimit-*` headers and returns `429 RATE_LIMITED` with `Retry-After`.
 
 `internal/platform/metrics` is a dependency-free registry that renders
 Prometheus text format at `GET /metrics`. The route label is the `ServeMux`
@@ -176,10 +177,11 @@ independent capabilities from it:
   if Redis errors, and the middleware allows traffic if both fail. Limits stay
   advisory during an outage instead of taking the API down.
 - **Read-through cache.** `Redis.Cache` stores JSON under versioned keys and
-  treats decode errors as misses (deleting the corrupt entry). The service
-  reads through it only in `Get`; mutations bypass it inside their transaction
-  and delete the key after commit. A miss populating the cache for `CACHE_TTL`
-  bounds the staleness window if an invalidation races with a read.
+  treats decode errors as misses (deleting the corrupt entry). Each entry has a
+  generation marker; mutations advance it after commit, and a read only
+  repopulates the cache if the generation it observed before the database read
+  is still current. That fence prevents a slow read from caching a pre-mutation
+  aggregate, while `CACHE_TTL` still bounds retention.
 
 Redis is never a source of truth: every cached value is reconstructible from
 PostgreSQL and every rate-limit decision degrades to local state.
@@ -254,6 +256,10 @@ when `DOCS_ENABLED` resolves to true (default: non-production). The docs page
 overrides the strict API CSP with a narrow policy that permits only the Scalar
 CDN and fonts, so the rest of the API keeps `default-src 'none'`.
 
+`/readyz` gates on required checks only (the database). Redis and RabbitMQ are
+reported in `checks`; their failure returns `200` with `"status":"degraded"`,
+so a lost optimization does not take every replica out of rotation.
+
 `ServeMux` produces plain-text 404/405 responses. A small fallback buffers only
 unmatched requests and rewrites them as problem documents, preserving the
 `Allow` header for 405s. Matched requests are served through the mux so
@@ -304,8 +310,8 @@ Unknown errors are logged with the request ID and never expose internal detail.
    authentication).
 2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapters.
 3. Create the Redis client (if configured) and assemble the cache and limiter.
-4. Create the RabbitMQ publisher (if configured), register its readiness check,
-   and start the outbox relay goroutine.
+4. Create the RabbitMQ publisher (if configured), register its optional health
+   check, and start the outbox relay goroutine.
 5. Build the credential chain, metrics registry, logger, service, health checks,
    and router.
 6. `net.Listen` first so binding errors surface before serving.
@@ -327,8 +333,9 @@ Unknown errors are logged with the request ID and never expose internal detail.
 - Rate limiting and metrics: token-bucket refill/pruning, Redis Lua bucket
   atomicity across clients, fallback behaviour, 429 mapping, and Prometheus
   rendering with bounded route labels.
-- Caching: hit/miss behaviour, write invalidation, and graceful degradation on
-  cache errors (fake cache), plus Redis set/get/TTL/corruption tests.
+- Caching: hit/miss behaviour, invalidation, generation fencing against stale
+  writes, and graceful degradation on cache errors (fake cache), plus Redis
+  set/get/TTL/corruption tests.
 - Outbox: one shared contract for memory and PostgreSQL covering enqueue,
   ordered claiming, lease expiry, publish, backoff, and pruning; relay tests
   cover publish success, failure scheduling, and shutdown.
