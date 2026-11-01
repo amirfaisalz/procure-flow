@@ -43,7 +43,9 @@ INSERT INTO outbox_events (
 	return nil
 }
 
-// Claim leases due, unpublished events to this relay until now+lease.
+// Claim leases due, unpublished events to this relay until now+lease. Due
+// events are selected by retry time and returned oldest first, matching the
+// in-memory adapter.
 func (r *OutboxRepository) Claim(ctx context.Context, limit int, now time.Time, lease time.Duration) ([]event.Event, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -115,10 +117,7 @@ WHERE id = $1 AND published_at IS NULL`,
 
 // MarkFailed records a delivery failure and schedules the next attempt.
 func (r *OutboxRepository) MarkFailed(ctx context.Context, id, cause string, next time.Time) error {
-	cause = strings.TrimSpace(cause)
-	if len(cause) > 500 {
-		cause = cause[:500]
-	}
+	cause = truncateCause(cause, 500)
 
 	_, err := querierFrom(ctx, r.db).ExecContext(ctx, `
 UPDATE outbox_events
@@ -147,4 +146,14 @@ WHERE published_at IS NOT NULL AND published_at < $1`,
 		return 0, fmt.Errorf("postgres: prune outbox rows affected: %w", err)
 	}
 	return removed, nil
+}
+
+// truncateCause bounds the stored error text without splitting a multi-byte
+// rune, which PostgreSQL would reject as invalid UTF-8.
+func truncateCause(cause string, maxLength int) string {
+	cause = strings.TrimSpace(cause)
+	if len(cause) <= maxLength {
+		return cause
+	}
+	return strings.ToValidUTF8(cause[:maxLength], "")
 }

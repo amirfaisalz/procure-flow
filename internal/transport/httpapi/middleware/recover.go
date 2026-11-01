@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -26,7 +27,7 @@ func Recover(logger *slog.Logger) Middleware {
 				if recovered == nil {
 					return
 				}
-				if recovered == http.ErrAbortHandler {
+				if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 					panic(recovered)
 				}
 

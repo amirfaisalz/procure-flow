@@ -36,7 +36,9 @@ func (c *Cache) Get(ctx context.Context, key string, dst any) (bool, error) {
 	}
 
 	if err := json.Unmarshal(raw, dst); err != nil {
-		_ = c.client.Del(ctx, c.prefix+key).Err()
+		if delErr := c.client.Del(ctx, c.prefix+key).Err(); delErr != nil {
+			return false, fmt.Errorf("cache: evict corrupt %q: %w", key, delErr)
+		}
 		return false, nil
 	}
 	return true, nil

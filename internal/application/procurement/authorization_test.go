@@ -175,6 +175,7 @@ func TestServiceSubmitOwnership(t *testing.T) {
 		{name: "other requester", ctx: requesterCtx("user_budi"), owner: "user_amir", wantErr: true},
 		{name: "admin override", ctx: adminCtx(), owner: "user_amir"},
 		{name: "viewer", ctx: ctxAs("user_viewer", app.RoleViewer), owner: "user_viewer", wantErr: true},
+		{name: "unowned request", ctx: requesterCtx("user_amir"), owner: "", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -293,6 +294,8 @@ func TestServiceCancelOwnership(t *testing.T) {
 	}{
 		{name: "owner", ctx: requesterCtx("user_amir"), owner: "user_amir"},
 		{name: "other requester", ctx: requesterCtx("user_budi"), owner: "user_amir", wantErr: true},
+		{name: "viewer owner", ctx: ctxAs("user_viewer", app.RoleViewer), owner: "user_viewer", wantErr: true},
+		{name: "unowned request", ctx: requesterCtx("user_amir"), owner: "", wantErr: true},
 		{name: "admin", ctx: adminCtx(), owner: "user_amir"},
 	}
 

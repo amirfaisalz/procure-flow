@@ -74,6 +74,9 @@ func (a *JWTAuthenticator) Authenticate(_ context.Context, r *http.Request) (Pri
 	if err := json.Unmarshal(headerJSON, &header); err != nil || header.Alg != "HS256" {
 		return Principal{}, ErrUnauthenticated
 	}
+	if header.Typ != "" && !strings.EqualFold(header.Typ, "JWT") {
+		return Principal{}, ErrUnauthenticated
+	}
 
 	mac := hmac.New(sha256.New, a.config.Secret)
 	mac.Write([]byte(parts[0] + "." + parts[1]))

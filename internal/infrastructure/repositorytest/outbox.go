@@ -29,6 +29,14 @@ func outboxEvent(id string, at time.Time) event.Event {
 	}
 }
 
+func outboxIDs(events []event.Event) []string {
+	ids := make([]string, len(events))
+	for i, ev := range events {
+		ids[i] = ev.ID
+	}
+	return ids
+}
+
 // RunOutbox executes the transactional outbox contract against an adapter.
 func RunOutbox(t *testing.T, newRepo NewOutboxRepository) {
 	t.Helper()
@@ -179,6 +187,34 @@ func RunOutbox(t *testing.T, newRepo NewOutboxRepository) {
 		}
 		if retried[0].Attempts != 1 {
 			t.Errorf("Attempts = %d, want 1", retried[0].Attempts)
+		}
+	})
+
+	t.Run("ClaimOrdersByOccurrenceAfterRetry", func(t *testing.T) {
+		repo := newRepo(t)
+		ctx := context.Background()
+		for _, ev := range []event.Event{
+			outboxEvent("e1", outboxBaseTime),
+			outboxEvent("e2", outboxBaseTime.Add(time.Minute)),
+		} {
+			if err := repo.Enqueue(ctx, ev); err != nil {
+				t.Fatalf("Enqueue(%s) error = %v", ev.ID, err)
+			}
+		}
+
+		if _, err := repo.Claim(ctx, 10, outboxBaseTime, time.Minute); err != nil {
+			t.Fatalf("Claim() error = %v", err)
+		}
+		if err := repo.MarkFailed(ctx, "e1", "broker unavailable", outboxBaseTime.Add(2*time.Minute)); err != nil {
+			t.Fatalf("MarkFailed() error = %v", err)
+		}
+
+		claimed, err := repo.Claim(ctx, 10, outboxBaseTime.Add(3*time.Minute), time.Minute)
+		if err != nil {
+			t.Fatalf("Claim() error = %v", err)
+		}
+		if len(claimed) != 2 || claimed[0].ID != "e1" || claimed[1].ID != "e2" {
+			t.Errorf("claimed = %v, want [e1 e2] (occurrence order)", outboxIDs(claimed))
 		}
 	})
 

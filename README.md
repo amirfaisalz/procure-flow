@@ -152,6 +152,8 @@ make run
 | `RATE_LIMIT_BURST` | `40` | Burst allowance per caller |
 | `METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
 | `REDIS_URL` | *(empty)* | `redis://` or `rediss://` URL; enables shared state |
+| `REDIS_DIAL_TIMEOUT` | `2s` | Redis connect and pool timeout |
+| `REDIS_COMMAND_TIMEOUT` | `1s` | Redis read/write command timeout |
 | `CACHE_ENABLED` | `true` when `REDIS_URL` is set | Read-through cache for GET by id |
 | `CACHE_TTL` | `30s` | Maximum staleness bound for cached aggregates |
 | `RATE_LIMIT_STORE` | `auto` | `auto`, `memory`, or `redis`; redis requires `REDIS_URL` |
@@ -316,7 +318,8 @@ go run ./cmd/migrate down                            # roll back the last one
 ```
 
 Set `DB_AUTO_MIGRATE=false` when migrations are applied by a deployment step
-instead of application startup.
+instead of application startup. The container image ships the same runner as
+`/migrate`, so a deployment job can run `/migrate up` against the database.
 
 ## Development
 

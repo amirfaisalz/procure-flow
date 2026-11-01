@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"strconv"
@@ -181,6 +182,21 @@ func LoadWorkerFrom(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("RABBITMQ_URL: required for the worker")
 	}
 	return cfg, nil
+}
+
+// LoadDatabase reads only the database settings. Migration tooling needs a
+// DATABASE_URL but not HTTP or authentication configuration, so it must not be
+// subject to the server's production requirements.
+func LoadDatabase() (Database, error) {
+	return LoadDatabaseFrom(os.Getenv)
+}
+
+// LoadDatabaseFrom is the testable form of LoadDatabase.
+func LoadDatabaseFrom(getenv func(string) string) (Database, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return loadDatabase(getenv)
 }
 
 // loadFrom parses every setting without applying deployment-specific policy.
@@ -769,6 +785,9 @@ func floatEnv(getenv func(string) string, key string, fallback float64) (float64
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s: invalid number %q: %w", key, raw, err)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("%s: must be a finite number", key)
 	}
 	if value <= 0 {
 		return 0, fmt.Errorf("%s: must be greater than zero", key)

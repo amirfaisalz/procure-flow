@@ -149,7 +149,7 @@ func (c *Consumer) consume(ctx context.Context) error {
 		return fmt.Errorf("set prefetch: %w", err)
 	}
 
-	deliveries, err := channel.Consume(queue.Name, "", false, false, false, false, nil)
+	deliveries, err := channel.Consume(queue.Name, c.cfg.Queue+"-consumer", false, false, false, false, nil)
 	if err != nil {
 		return fmt.Errorf("consume queue %q: %w", queue.Name, err)
 	}
@@ -163,7 +163,7 @@ func (c *Consumer) consume(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = channel.Cancel("", false)
+			_ = channel.Cancel(c.cfg.Queue+"-consumer", false)
 			return nil
 		case delivery, ok := <-deliveries:
 			if !ok {
@@ -195,6 +195,15 @@ func (c *Consumer) handle(ctx context.Context, delivery amqp.Delivery) {
 	}
 
 	if err := c.deliver(ctx, ev); err != nil {
+		if ctx.Err() != nil {
+			// Shutting down: leave the delivery unsettled so the broker
+			// requeues it for another replica instead of dead-lettering it.
+			c.logger.WarnContext(ctx, "shutdown interrupted event handling; leaving the delivery unacknowledged",
+				slog.String("queue", c.cfg.Queue),
+				slog.String("event_id", ev.ID),
+			)
+			return
+		}
 		c.logger.ErrorContext(ctx, "event handler failed; dead-lettering",
 			slog.String("queue", c.cfg.Queue),
 			slog.String("event_id", ev.ID),

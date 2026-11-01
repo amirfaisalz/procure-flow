@@ -3,8 +3,10 @@
 .github/
 .env
 .env.*
+.tmp/
 bin/
 coverage.out
+*.log
 Dockerfile
 .dockerignore
 README.md

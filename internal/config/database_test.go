@@ -132,3 +132,18 @@ func TestLoadDatabaseRequiredInProduction(t *testing.T) {
 		t.Errorf("LoadFrom() with DATABASE_URL error = %v, want nil", err)
 	}
 }
+
+func TestLoadDatabaseFromIgnoresServerPolicy(t *testing.T) {
+	// Migration tooling sets APP_ENV=production but only needs the database URL;
+	// it must not be forced to configure authentication.
+	db, err := config.LoadDatabaseFrom(env(map[string]string{
+		"APP_ENV":      "production",
+		"DATABASE_URL": "postgres://localhost/procure",
+	}))
+	if err != nil {
+		t.Fatalf("LoadDatabaseFrom() error = %v", err)
+	}
+	if db.URL != "postgres://localhost/procure" {
+		t.Errorf("URL = %q, want the configured database", db.URL)
+	}
+}

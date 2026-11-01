@@ -17,7 +17,9 @@ import (
 type Repository interface {
 	// Enqueue persists an event as part of the caller's transaction.
 	Enqueue(ctx context.Context, ev event.Event) error
-	// Claim leases up to limit due, unpublished events until now+lease.
+	// Claim leases up to limit due, unpublished events until now+lease. Due
+	// events are selected by retry time and returned oldest first (occurred_at,
+	// then id), so adapters agree on ordering.
 	Claim(ctx context.Context, limit int, now time.Time, lease time.Duration) ([]event.Event, error)
 	// MarkPublished records successful delivery to the broker.
 	MarkPublished(ctx context.Context, id string, at time.Time) error

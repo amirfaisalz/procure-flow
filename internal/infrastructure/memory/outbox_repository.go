@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +22,6 @@ type outboxRecord struct {
 	event       event.Event
 	nextAttempt time.Time
 	attempts    int
-	lastError   string
 	published   bool
 	publishedAt time.Time
 }
@@ -57,7 +55,8 @@ func (r *OutboxRepository) Enqueue(ctx context.Context, ev event.Event) error {
 	return nil
 }
 
-// Claim leases up to limit due events, ordered by next attempt time.
+// Claim leases up to limit due events. Due events are selected by retry time
+// and returned oldest first, matching the PostgreSQL adapter.
 func (r *OutboxRepository) Claim(ctx context.Context, limit int, now time.Time, lease time.Duration) ([]event.Event, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -99,6 +98,12 @@ func (r *OutboxRepository) Claim(ctx context.Context, limit int, now time.Time, 
 		claimed.Attempts = record.attempts
 		out = append(out, claimed)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].OccurredAt.Equal(out[j].OccurredAt) {
+			return out[i].OccurredAt.Before(out[j].OccurredAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
@@ -117,7 +122,6 @@ func (r *OutboxRepository) MarkPublished(ctx context.Context, id string, at time
 	}
 	record.published = true
 	record.publishedAt = at
-	record.lastError = ""
 	return nil
 }
 
@@ -135,7 +139,6 @@ func (r *OutboxRepository) MarkFailed(ctx context.Context, id, cause string, nex
 		return nil
 	}
 	record.attempts++
-	record.lastError = truncateCause(cause)
 	record.nextAttempt = next
 	return nil
 }
@@ -157,14 +160,4 @@ func (r *OutboxRepository) Prune(ctx context.Context, before time.Time) (int64, 
 		}
 	}
 	return removed, nil
-}
-
-// truncateCause bounds the stored error text.
-func truncateCause(cause string) string {
-	const maxLength = 500
-	cause = strings.TrimSpace(cause)
-	if len(cause) <= maxLength {
-		return cause
-	}
-	return cause[:maxLength]
 }

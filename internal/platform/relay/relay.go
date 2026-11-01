@@ -109,7 +109,9 @@ func (r *Relay) RunOnce(ctx context.Context) (int, error) {
 	delivered := 0
 	for _, ev := range events {
 		if err := r.publisher.Publish(ctx, ev); err != nil {
-			next := now.Add(r.backoff(ev.Attempts + 1))
+			// Anchor the retry at the failure time: a slow publish (confirm
+			// timeout) must not consume the backoff window.
+			next := r.now().UTC().Add(r.backoff(ev.Attempts + 1))
 			if markErr := r.repo.MarkFailed(ctx, ev.ID, err.Error(), next); markErr != nil {
 				r.logger.ErrorContext(ctx, "outbox relay could not record a failure",
 					slog.String("event_id", ev.ID),

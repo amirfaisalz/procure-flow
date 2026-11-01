@@ -98,6 +98,22 @@ func TestHandleRetriesThenDeadLetters(t *testing.T) {
 	}
 }
 
+func TestHandleLeavesDeliveryUnsettledDuringShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	consumer := testConsumer(func(ctx context.Context, _ event.Event) error {
+		return ctx.Err()
+	}, 3)
+
+	ack := &fakeAcknowledger{}
+	consumer.handle(ctx, delivery(t, testEvent(), ack))
+
+	if ack.acks != 0 || ack.nacks != 0 {
+		t.Errorf("acks/nacks = %d/%d, want 0/0 on shutdown", ack.acks, ack.nacks)
+	}
+}
+
 func TestHandleRejectsUndecodablePayload(t *testing.T) {
 	var calls int
 	consumer := testConsumer(func(context.Context, event.Event) error {

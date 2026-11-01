@@ -308,10 +308,11 @@ Unknown errors are logged with the request ID and never expose internal detail.
    and start the outbox relay goroutine.
 5. Build the credential chain, metrics registry, logger, service, health checks,
    and router.
-4. `net.Listen` first so binding errors surface before serving.
-5. `Serve` in a goroutine.
-6. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
-7. Return after in-flight requests drain or the budget expires.
+6. `net.Listen` first so binding errors surface before serving.
+7. `Serve` in a goroutine.
+8. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
+9. Wait for the outbox relay goroutine to stop, then close the publisher and
+   database, after in-flight requests drain or the budget expires.
 
 ## Testing strategy
 

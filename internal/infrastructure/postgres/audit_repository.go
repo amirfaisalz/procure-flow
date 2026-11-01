@@ -76,7 +76,7 @@ func (r *AuditRepository) List(ctx context.Context, filter audit.ListFilter) (au
 		 WHERE entity_type = $1 AND entity_id = $2
 		 ORDER BY occurred_at DESC, id DESC
 		 LIMIT $3 OFFSET $4`,
-		filter.EntityType, filter.EntityID, pageSize, (page-1)*pageSize,
+		filter.EntityType, filter.EntityID, pageSize, pageStart(page, pageSize, total),
 	)
 	if err != nil {
 		return audit.ListResult{}, fmt.Errorf("postgres: list audit events: %w", err)

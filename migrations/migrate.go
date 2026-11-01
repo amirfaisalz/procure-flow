@@ -85,9 +85,16 @@ func Down(ctx context.Context, db *sql.DB) (bool, error) {
 			return err
 		}
 
+		latest := ""
+		for version := range applied {
+			if version > latest {
+				latest = version
+			}
+		}
+
 		for i := len(list) - 1; i >= 0; i-- {
 			m := list[i]
-			if _, ok := applied[m.Version]; !ok {
+			if m.Version != latest {
 				continue
 			}
 			if err := run(ctx, conn, m, false); err != nil {
@@ -96,7 +103,7 @@ func Down(ctx context.Context, db *sql.DB) (bool, error) {
 			rolledBack = true
 			return nil
 		}
-		return nil
+		return fmt.Errorf("applied migration %q has no embedded up/down files", latest)
 	})
 	return rolledBack, err
 }
@@ -148,7 +155,11 @@ func List(ctx context.Context, db *sql.DB) ([]Status, error) {
 }
 
 func load() ([]Migration, error) {
-	entries, err := fs.ReadDir(Files, ".")
+	return loadFS(Files)
+}
+
+func loadFS(fsys fs.FS) ([]Migration, error) {
+	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded migrations: %w", err)
 	}
@@ -161,11 +172,14 @@ func load() ([]Migration, error) {
 
 		match := fileNamePattern.FindStringSubmatch(entry.Name())
 		if match == nil {
+			if strings.HasSuffix(strings.ToLower(entry.Name()), ".sql") {
+				return nil, fmt.Errorf("migration file %q does not match NNNN_name.(up|down).sql", entry.Name())
+			}
 			continue
 		}
 
 		version, name, direction := match[1], match[2], match[3]
-		content, err := Files.ReadFile(entry.Name())
+		content, err := fs.ReadFile(fsys, entry.Name())
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", entry.Name(), err)
 		}

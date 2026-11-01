@@ -53,19 +53,6 @@ func TestJSONWithMeta(t *testing.T) {
 	}
 }
 
-func TestNoContent(t *testing.T) {
-	rec := httptest.NewRecorder()
-
-	response.NoContent(rec)
-
-	if rec.Code != http.StatusNoContent {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusNoContent)
-	}
-	if rec.Body.Len() != 0 {
-		t.Errorf("body = %q, want empty", rec.Body.String())
-	}
-}
-
 func TestWriteProblem(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/procurements", nil)
 	req = req.WithContext(requestid.With(req.Context(), "req-123"))

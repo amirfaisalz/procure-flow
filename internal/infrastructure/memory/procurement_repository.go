@@ -11,8 +11,7 @@ import (
 )
 
 // ProcurementRepository is a thread-safe, in-memory adapter used for local
-// development and tests. Replace it with a SQL adapter in production without
-// changing the application layer.
+// development and tests. Production uses the PostgreSQL adapter.
 type ProcurementRepository struct {
 	mu      sync.RWMutex
 	items   map[string]procurement.Procurement
@@ -134,10 +133,7 @@ func (r *ProcurementRepository) List(ctx context.Context, filter procurement.Lis
 	}
 
 	total := len(matched)
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
-	}
+	start := pageStart(page, pageSize, total)
 	end := start + pageSize
 	if end > total {
 		end = total

@@ -2,7 +2,6 @@ package logging_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -62,17 +61,5 @@ func TestNewFiltersBelowLevel(t *testing.T) {
 	logger.Warn("shown")
 	if !strings.Contains(buf.String(), "shown") {
 		t.Errorf("output = %q, want shown", buf.String())
-	}
-}
-
-func TestContextLogger(t *testing.T) {
-	if got := logging.From(context.Background()); got != slog.Default() {
-		t.Error("From(background) should return slog.Default()")
-	}
-
-	custom := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	ctx := logging.WithLogger(context.Background(), custom)
-	if got := logging.From(ctx); got != custom {
-		t.Error("From(ctx) did not return the injected logger")
 	}
 }

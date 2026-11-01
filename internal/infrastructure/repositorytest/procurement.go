@@ -202,6 +202,21 @@ func Run(t *testing.T, newRepo NewRepository) {
 		}
 	})
 
+	t.Run("ListHugePageIsEmpty", func(t *testing.T) {
+		repo := newRepo(t)
+		seedList(t, repo)
+
+		result, err := repo.List(context.Background(), procurement.ListFilter{
+			Page: int(^uint(0) >> 1), PageSize: 100,
+		})
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if result.Total != 5 || len(result.Items) != 0 {
+			t.Errorf("result = (%d, %d), want (5, 0)", result.Total, len(result.Items))
+		}
+	})
+
 	t.Run("ListEmpty", func(t *testing.T) {
 		repo := newRepo(t)
 		result, err := repo.List(context.Background(), procurement.ListFilter{Page: 1, PageSize: 10})

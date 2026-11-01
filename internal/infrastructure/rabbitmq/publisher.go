@@ -150,6 +150,9 @@ func (p *Publisher) Publish(ctx context.Context, ev event.Event) error {
 
 	select {
 	case <-ctx.Done():
+		// Discard the channel and its pending confirmation; otherwise the next
+		// publish would read this confirmation as its own verdict.
+		_ = p.resetLocked()
 		return ctx.Err()
 	case <-timer.C:
 		_ = p.resetLocked()

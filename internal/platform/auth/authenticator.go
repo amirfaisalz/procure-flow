@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -25,7 +26,7 @@ func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, er
 		if err == nil {
 			return principal, nil
 		}
-		if err != ErrUnauthenticated {
+		if !errors.Is(err, ErrUnauthenticated) {
 			return Principal{}, err
 		}
 	}

@@ -1,7 +1,9 @@
 package middleware_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,6 +185,37 @@ func TestIdempotencyReleasesClaimOnServerError(t *testing.T) {
 	}
 }
 
+func TestIdempotencyKeepsClaimWhenCompletionFails(t *testing.T) {
+	var calls int32
+	repo := completeFailingRepository{Repository: memory.NewIdempotencyRepository()}
+	h := middleware.Idempotency(repo, time.Hour, func() time.Time { return idempotentClock }, nil)(
+		idempotentHandler(&calls, http.StatusCreated),
+	)
+
+	first := serveIdempotent(t, h, idempotentBody, "key-1", "user_amir")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first status = %d, want 201", first.Code)
+	}
+
+	// The write succeeded but storing the replay failed. The claim must stay
+	// held so a retry cannot execute the side effect a second time.
+	second := serveIdempotent(t, h, idempotentBody, "key-1", "user_amir")
+	if second.Code != http.StatusConflict {
+		t.Fatalf("retry status = %d, want 409; body = %s", second.Code, second.Body.String())
+	}
+	if calls != 1 {
+		t.Errorf("handler calls = %d, want 1", calls)
+	}
+}
+
+type completeFailingRepository struct {
+	idempotency.Repository
+}
+
+func (completeFailingRepository) Complete(context.Context, string, string, int, string, string, []byte) error {
+	return errors.New("storage unavailable")
+}
+
 func TestIdempotencyIsScopedPerActor(t *testing.T) {
 	var calls int32
 	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
@@ -201,6 +234,20 @@ func TestIdempotencyRejectsInvalidKey(t *testing.T) {
 	rec := serveIdempotent(t, h, idempotentBody, strings.Repeat("k", 256), "user_amir")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if calls != 0 {
+		t.Errorf("handler calls = %d, want 0", calls)
+	}
+}
+
+func TestIdempotencyRejectsOversizedBody(t *testing.T) {
+	var calls int32
+	h := wrapIdempotent(memory.NewIdempotencyRepository(), idempotentHandler(&calls, http.StatusCreated))
+
+	body := strings.Repeat("a", (1<<20)+1)
+	rec := serveIdempotent(t, h, body, "key-1", "user_amir")
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
 	}
 	if calls != 0 {
 		t.Errorf("handler calls = %d, want 0", calls)

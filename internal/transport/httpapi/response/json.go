@@ -21,11 +21,6 @@ func JSONWithMeta(w http.ResponseWriter, status int, data, meta any) {
 	writeJSON(w, status, Envelope{Data: data, Meta: meta})
 }
 
-// NoContent writes a bodyless 204 response.
-func NoContent(w http.ResponseWriter) {
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	body, err := json.Marshal(payload)
 	if err != nil {

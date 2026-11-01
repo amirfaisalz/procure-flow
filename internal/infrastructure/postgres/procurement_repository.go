@@ -130,7 +130,7 @@ func (r *ProcurementRepository) List(ctx context.Context, filter procurement.Lis
 		return procurement.ListResult{}, fmt.Errorf("postgres: count procurements: %w", err)
 	}
 
-	args = append(args, pageSize, (page-1)*pageSize)
+	args = append(args, pageSize, pageStart(page, pageSize, total))
 	listQuery := fmt.Sprintf(
 		`SELECT %s FROM procurements%s ORDER BY created_at DESC, id ASC LIMIT $%d OFFSET $%d`,
 		procurementColumns, where, len(args)-1, len(args),

@@ -88,6 +88,7 @@ func run() error {
 	// The outbox exists to feed the broker. Without a broker URL the service
 	// skips event emission entirely so rows cannot accumulate forever.
 	var publisher *rabbitmq.Publisher
+	var relayStopped <-chan struct{}
 	if cfg.RabbitMQ.URL != "" {
 		serviceOptions = append(serviceOptions, app.WithOutbox(store.outbox))
 
@@ -103,7 +104,12 @@ func run() error {
 		cancel()
 
 		relayer := relay.New(store.outbox, publisher, logger, relay.DefaultConfig())
-		go relayer.Run(ctx)
+		stopped := make(chan struct{})
+		relayStopped = stopped
+		go func() {
+			defer close(stopped)
+			relayer.Run(ctx)
+		}()
 		logger.Info("outbox relay started", slog.String("exchange", cfg.RabbitMQ.Exchange))
 	}
 
@@ -147,7 +153,19 @@ func run() error {
 		slog.String("version", version),
 	)
 
-	return httpapi.Run(ctx, listener, server, cfg.HTTP.ShutdownTimeout, logger)
+	runErr := httpapi.Run(ctx, listener, server, cfg.HTTP.ShutdownTimeout, logger)
+	// Cancel the context even when Serve failed before a signal arrived, so the
+	// relay does not outlive the server. stop also unregisters the signal
+	// handlers; the deferred call is then a no-op.
+	stop()
+	if relayStopped != nil {
+		select {
+		case <-relayStopped:
+		case <-time.After(cfg.HTTP.ShutdownTimeout):
+			logger.Warn("outbox relay did not stop within the shutdown budget")
+		}
+	}
+	return runErr
 }
 
 // openRedis creates the shared Redis client and registers its readiness check.
@@ -230,10 +248,10 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 		}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelConnect()
 
-	db, err := postgres.Open(ctx, postgres.Options{
+	db, err := postgres.Open(connectCtx, postgres.Options{
 		URL:             cfg.Database.URL,
 		MaxOpenConns:    cfg.Database.MaxOpenConns,
 		MaxIdleConns:    cfg.Database.MaxIdleConns,
@@ -245,7 +263,12 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 	}
 
 	if cfg.Database.AutoMigrate {
-		if err := migrations.Up(ctx, db); err != nil {
+		// Migrations can wait on another replica's advisory lock, so they get a
+		// separate budget from the connection attempt.
+		migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 5*time.Minute)
+		err := migrations.Up(migrateCtx, db)
+		cancelMigrate()
+		if err != nil {
 			_ = db.Close()
 			return storage{}, fmt.Errorf("apply migrations: %w", err)
 		}

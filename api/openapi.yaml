@@ -6,10 +6,10 @@ info:
     Procurement workflow API. Success responses use `{"data": ..., "meta": ...}`.
     Errors use RFC 9457 `application/problem+json`.
 
-    Write endpoints accept an `Idempotency-Key` header: retrying with the same
-    key and body replays the original response instead of creating a duplicate.
-    API routes are rate limited per caller and return `429` with `Retry-After`
-    when the bucket is exhausted.
+    The create endpoint accepts an `Idempotency-Key` header: retrying with the
+    same key and body replays the original response instead of creating a
+    duplicate. API routes are rate limited per caller and return `429` with
+    `Retry-After` when the bucket is exhausted.
 
     Lifecycle changes also publish asynchronous events (requester notifications
     and ERP syncs) through a transactional outbox. Those side effects happen in
@@ -268,6 +268,10 @@ paths:
           $ref: "#/components/responses/Procurement"
         "400":
           $ref: "#/components/responses/Problem"
+        "413":
+          $ref: "#/components/responses/Problem"
+        "415":
+          $ref: "#/components/responses/Problem"
         "404":
           $ref: "#/components/responses/Problem"
         "409":
@@ -329,6 +333,8 @@ paths:
                       $ref: "#/components/schemas/AuditEvent"
                   meta:
                     $ref: "#/components/schemas/PageMeta"
+        "400":
+          $ref: "#/components/responses/Problem"
         "404":
           $ref: "#/components/responses/Problem"
   /metrics:

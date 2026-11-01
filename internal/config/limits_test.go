@@ -101,6 +101,8 @@ func TestLoadRateLimitRejectsInvalidValues(t *testing.T) {
 		{"RATE_LIMIT_RPS": "0"},
 		{"RATE_LIMIT_RPS": "-1"},
 		{"RATE_LIMIT_RPS": "fast"},
+		{"RATE_LIMIT_RPS": "NaN"},
+		{"RATE_LIMIT_RPS": "Inf"},
 		{"RATE_LIMIT_BURST": "0"},
 		{"RATE_LIMIT_BURST": "-3"},
 	}

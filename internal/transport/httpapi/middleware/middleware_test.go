@@ -314,6 +314,12 @@ func TestCORS(t *testing.T) {
 		if rec.Header().Get("Access-Control-Allow-Methods") == "" {
 			t.Error("Allow-Methods is empty")
 		}
+		if allowHeaders := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(allowHeaders, "Idempotency-Key") {
+			t.Errorf("Allow-Headers = %q, want Idempotency-Key", allowHeaders)
+		}
+		if expose := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(expose, "Idempotent-Replayed") {
+			t.Errorf("Expose-Headers = %q, want Idempotent-Replayed", expose)
+		}
 		if !strings.Contains(rec.Header().Get("Vary"), "Origin") {
 			t.Errorf("Vary = %q, want Origin", rec.Header().Get("Vary"))
 		}

@@ -104,8 +104,9 @@ func NewService(repo domainproc.Repository, ids IDGenerator, now func() time.Tim
 	return service
 }
 
-// Create validates and persists a new draft procurement. The requester is
-// always derived from the authenticated actor, never from client input.
+// Create validates and persists a new draft procurement. Ownership is always
+// derived from the authenticated actor; the optional requester name is only a
+// display label and cannot change requester_id.
 func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Procurement, error) {
 	actor, err := requireActor(ctx)
 	if err != nil {
@@ -389,7 +390,9 @@ func canSubmit(actor Actor, p domainproc.Procurement) bool {
 	if !actor.HasRole(RoleRequester) {
 		return false
 	}
-	return p.RequesterID == "" || p.RequesterID == actor.Subject
+	// Requests without a recorded owner (imported or legacy rows) cannot be
+	// submitted by an arbitrary requester; only an admin may act on them.
+	return p.RequesterID != "" && p.RequesterID == actor.Subject
 }
 
 func canApprove(actor Actor, p domainproc.Procurement) bool {
@@ -404,7 +407,13 @@ func canApprove(actor Actor, p domainproc.Procurement) bool {
 }
 
 func canCancel(actor Actor, p domainproc.Procurement) bool {
-	return actor.IsAdmin() || (p.RequesterID != "" && p.RequesterID == actor.Subject)
+	if actor.IsAdmin() {
+		return true
+	}
+	if !actor.HasRole(RoleRequester) {
+		return false
+	}
+	return p.RequesterID != "" && p.RequesterID == actor.Subject
 }
 
 func primaryRole(actor Actor) string {

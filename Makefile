@@ -60,7 +60,7 @@ vet: ## Run go vet
 
 .PHONY: fmt
 fmt: ## Format all Go files
-	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
+	go fmt ./...
 
 .PHONY: check
 check: fmt vet test-integration ## Format, vet, and race-test (with database)

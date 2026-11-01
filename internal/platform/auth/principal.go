@@ -68,11 +68,6 @@ func (p Principal) HasRole(role Role) bool {
 	return false
 }
 
-// IsAdmin reports whether the principal holds the admin role.
-func (p Principal) IsAdmin() bool {
-	return p.HasRole(RoleAdmin)
-}
-
 // ErrUnauthenticated is returned when a request carries no valid credentials.
 var ErrUnauthenticated = errors.New("unauthenticated")
 

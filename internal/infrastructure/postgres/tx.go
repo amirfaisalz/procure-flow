@@ -38,11 +38,21 @@ func (u *UnitOfWork) WithinTx(ctx context.Context, fn func(context.Context) erro
 		return err
 	}
 
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
 	if err := fn(context.WithValue(ctx, txKey{}, tx)); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // querierFrom returns the transaction carried by ctx, or the pool.

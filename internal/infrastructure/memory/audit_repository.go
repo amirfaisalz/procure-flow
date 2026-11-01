@@ -74,10 +74,7 @@ func (r *AuditRepository) List(ctx context.Context, filter audit.ListFilter) (au
 	})
 
 	total := len(out)
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
-	}
+	start := pageStart(page, pageSize, total)
 	end := start + pageSize
 	if end > total {
 		end = total

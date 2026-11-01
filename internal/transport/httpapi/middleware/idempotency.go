@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -70,8 +71,19 @@ func Idempotency(repo idempotency.Repository, ttl time.Duration, now func() time
 				return
 			}
 
+			r.Body = http.MaxBytesReader(w, r.Body, response.DefaultMaxBodyBytes)
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(err, &maxBytesErr) {
+					response.WriteProblem(w, r, response.NewProblem(
+						http.StatusRequestEntityTooLarge,
+						"PAYLOAD_TOO_LARGE",
+						"Request body too large",
+						"the request body exceeds the allowed size",
+					))
+					return
+				}
 				response.WriteProblem(w, r, response.NewProblem(
 					http.StatusBadRequest,
 					"INVALID_BODY",
@@ -140,9 +152,11 @@ func Idempotency(repo idempotency.Repository, ttl time.Duration, now func() time
 					slog.String("error", err.Error()),
 					slog.String("request_id", requestid.From(r.Context())),
 				)
-			} else {
-				completed = true
+				// Keep the claim. The handler already committed its side effect,
+				// so releasing it would let a retry execute the write twice.
+				// Retries see IDEMPOTENCY_IN_PROGRESS until the TTL expires.
 			}
+			completed = true
 			writeThrough(w, recorder)
 		})
 	}
@@ -195,6 +209,8 @@ func requestHash(r *http.Request, body []byte) string {
 	_, _ = sum.Write([]byte(r.Method))
 	_, _ = sum.Write([]byte{0})
 	_, _ = sum.Write([]byte(r.URL.RequestURI()))
+	_, _ = sum.Write([]byte{0})
+	_, _ = sum.Write([]byte(r.Header.Get("Content-Type")))
 	_, _ = sum.Write([]byte{0})
 	_, _ = sum.Write(body)
 	return hex.EncodeToString(sum.Sum(nil))

@@ -31,23 +31,25 @@ func run() error {
 		command = os.Args[1]
 	}
 
-	cfg, err := config.Load()
+	dbConfig, err := config.LoadDatabase()
 	if err != nil {
-		return fmt.Errorf("load configuration: %w", err)
+		return fmt.Errorf("load database configuration: %w", err)
 	}
-	if cfg.Database.URL == "" {
+	if dbConfig.URL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Generous budget: migrations may have to wait for another migrator's
+	// advisory lock before they can run.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	db, err := postgres.Open(ctx, postgres.Options{
-		URL:             cfg.Database.URL,
-		MaxOpenConns:    cfg.Database.MaxOpenConns,
-		MaxIdleConns:    cfg.Database.MaxIdleConns,
-		ConnMaxLifetime: cfg.Database.ConnMaxLifetime,
-		ConnMaxIdleTime: cfg.Database.ConnMaxIdleTime,
+		URL:             dbConfig.URL,
+		MaxOpenConns:    dbConfig.MaxOpenConns,
+		MaxIdleConns:    dbConfig.MaxIdleConns,
+		ConnMaxLifetime: dbConfig.ConnMaxLifetime,
+		ConnMaxIdleTime: dbConfig.ConnMaxIdleTime,
 	})
 	if err != nil {
 		return err

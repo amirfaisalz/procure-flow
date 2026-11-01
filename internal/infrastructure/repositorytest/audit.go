@@ -167,6 +167,33 @@ func RunAudit(t *testing.T, newRepo NewAuditRepository) {
 		}
 	})
 
+	t.Run("HugePageIsEmpty", func(t *testing.T) {
+		repo := newRepo(t)
+		ctx := context.Background()
+		if err := repo.Append(ctx, audit.Event{
+			EntityType: audit.EntityProcurement,
+			EntityID:   "prc_huge",
+			Action:     "procurement.created",
+			ActorID:    "user_amir",
+			OccurredAt: auditBaseTime,
+		}); err != nil {
+			t.Fatalf("Append() error = %v", err)
+		}
+
+		result, err := repo.List(ctx, audit.ListFilter{
+			EntityType: audit.EntityProcurement,
+			EntityID:   "prc_huge",
+			Page:       int(^uint(0) >> 1),
+			PageSize:   100,
+		})
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(result.Events) != 0 || result.Total != 1 {
+			t.Errorf("result = %d events (total %d), want an empty page", len(result.Events), result.Total)
+		}
+	})
+
 	t.Run("ListEmpty", func(t *testing.T) {
 		repo := newRepo(t)
 		result, err := repo.List(context.Background(), audit.ListFilter{
