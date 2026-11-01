@@ -18,6 +18,11 @@ third-party web framework; PostgreSQL is reached through the pure-Go `pgx`
 - Security headers, exact-origin CORS, per-request timeout.
 - Liveness/readiness probes with pluggable dependency checks.
 - Graceful shutdown on `SIGINT`/`SIGTERM`.
+- Authentication with static API keys or HS256 JWTs (algorithm pinned).
+- Role-based access control: `admin`, `approver`, `requester`, and `viewer`,
+  with department scoping for approvers and ownership checks for requesters.
+- Append-only audit trail written in the same transaction as each change, with
+  a database trigger that rejects updates and deletes.
 - Scalar API reference (OpenAPI 3.1) and an HTTP request collection.
 - CI that runs `gofmt`, `go vet`, race tests against PostgreSQL, and a build.
 
@@ -100,10 +105,57 @@ make run
 | `DB_CONN_MAX_IDLE_TIME` | `5m` | Connection maximum idle time |
 | `DB_AUTO_MIGRATE` | `true` | Apply embedded migrations on startup |
 | `CORS_ALLOWED_ORIGINS` | *(empty)* | Comma-separated exact origins |
+| `AUTH_ENABLED` | `true` in staging/production, `false` in development | Require authentication |
+| `AUTH_API_KEYS` | *(empty)* | JSON array of static API keys |
+| `AUTH_JWT_SECRET` | *(empty)* | HS256 secret, at least 32 characters |
+| `AUTH_JWT_ISSUER` | `procure-flow` | Required JWT `iss` |
+| `AUTH_JWT_AUDIENCE` | `procure-flow-api` | Required JWT `aud` |
+| `AUTH_JWT_LEEWAY` | `30s` | Clock-skew tolerance |
 | `DOCS_ENABLED` | `true` (non-production) | Serve `/docs` and `/openapi.yaml` |
 
 `HTTP_REQUEST_TIMEOUT` must not exceed `HTTP_WRITE_TIMEOUT`. Wildcard CORS
 origins are rejected. `DB_MAX_IDLE_CONNS` must not exceed `DB_MAX_OPEN_CONNS`.
+Production requires `DATABASE_URL`, `AUTH_ENABLED=true`, and at least one of
+`AUTH_API_KEYS` or `AUTH_JWT_SECRET`.
+
+## Authentication and authorization
+
+`/healthz`, `/readyz`, `/docs`, and `/openapi.yaml` are public. Every
+`/api/v1` route requires `Authorization: Bearer <token>`. A static API key or an
+HS256 JWT is accepted. JWTs must carry `sub`, `exp`, a valid `roles` claim, and
+match the configured issuer and audience.
+
+```bash
+export AUTH_ENABLED=true
+export AUTH_API_KEYS='[{"token":"local-admin-token-0123456789","subject":"user_admin","name":"Local Admin","roles":["admin"]}]'
+make run
+
+curl -s http://localhost:8080/api/v1/procurements \
+  -H 'Authorization: Bearer local-admin-token-0123456789'
+```
+
+| Role | Permissions |
+| --- | --- |
+| `admin` | Everything, including cross-department approval and ownership overrides |
+| `approver` | Approve or reject submitted requests in the actor's department |
+| `requester` | Create requests; submit and cancel requests they own |
+| `viewer` | Read requests and audit trails |
+
+Ownership is recorded as `requester_id`, derived from the token subject rather
+than the request body. Authorization fails closed: a missing actor is treated
+as forbidden. When `AUTH_ENABLED=false`, the router injects a local admin actor
+so development keeps working without credentials.
+
+### Audit trail
+
+Every create, submit, approve, reject, and cancel writes an immutable event.
+On PostgreSQL the aggregate and the audit row share one transaction, so a
+failed audit write rolls back the change. Read the trail with:
+
+```bash
+curl -s http://localhost:8080/api/v1/procurements/<id>/audit \
+  -H 'Authorization: Bearer local-admin-token-0123456789'
+```
 
 ## Database and migrations
 
@@ -225,6 +277,8 @@ make docker-build
 docker run --rm -p 8080:8080 \
   -e APP_ENV=production \
   -e DATABASE_URL='postgres://user:pass@host:5432/procure?sslmode=disable' \
+  -e AUTH_ENABLED=true \
+  -e AUTH_API_KEYS='[{"token":"replace-me-0123456789","subject":"user_admin","name":"Admin","roles":["admin"]}]' \
   procure-flow:local```
 
 Or run the full stack:
@@ -235,7 +289,7 @@ docker compose -f deployments/docker-compose.yml up --build
 
 ## Roadmap
 
-- Authentication/authorization (JWT/OIDC, roles) and per-actor audit trail.
+- OIDC discovery and key rotation for JWT verification.
 - OpenTelemetry tracing and Prometheus metrics.
 - Rate limiting and idempotency keys.
 - Kubernetes manifests and load/fuzz tests.

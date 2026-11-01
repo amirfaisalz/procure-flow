@@ -115,7 +115,7 @@ func TestServiceCreate(t *testing.T) {
 	repo := &fakeRepo{}
 	svc := newService(repo)
 
-	got, err := svc.Create(context.Background(), validInput())
+	got, err := svc.Create(adminCtx(), validInput())
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -149,7 +149,7 @@ func TestServiceCreateValidation(t *testing.T) {
 
 	input := validInput()
 	input.Title = ""
-	_, err := svc.Create(context.Background(), input)
+	_, err := svc.Create(adminCtx(), input)
 
 	requireFieldError(t, err, "title")
 	if repo.createCalled {
@@ -161,7 +161,7 @@ func TestServiceCreateRepositoryError(t *testing.T) {
 	repo := &fakeRepo{createErr: domain.ErrConflict}
 	svc := newService(repo)
 
-	_, err := svc.Create(context.Background(), validInput())
+	_, err := svc.Create(adminCtx(), validInput())
 	if !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("Create() error = %v, want ErrConflict", err)
 	}
@@ -171,7 +171,7 @@ func TestServiceGet(t *testing.T) {
 	repo := &fakeRepo{has: true, item: domainproc.Procurement{ID: "prc_1", Title: "Laptop"}}
 	svc := newService(repo)
 
-	got, err := svc.Get(context.Background(), " prc_1 ")
+	got, err := svc.Get(adminCtx(), " prc_1 ")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -179,7 +179,7 @@ func TestServiceGet(t *testing.T) {
 		t.Errorf("ID = %q, want prc_1", got.ID)
 	}
 
-	_, err = svc.Get(context.Background(), "missing")
+	_, err = svc.Get(adminCtx(), "missing")
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("Get(missing) error = %v, want ErrNotFound", err)
 	}
@@ -189,7 +189,7 @@ func TestServiceGetRejectsEmptyID(t *testing.T) {
 	repo := &fakeRepo{}
 	svc := newService(repo)
 
-	_, err := svc.Get(context.Background(), "   ")
+	_, err := svc.Get(adminCtx(), "   ")
 	requireFieldError(t, err, "id")
 	if repo.getCalled {
 		t.Error("repository GetByID was called for an empty ID")
@@ -207,7 +207,7 @@ func TestServiceListDefaultsAndNormalization(t *testing.T) {
 	}
 	svc := newService(repo)
 
-	got, err := svc.List(context.Background(), domainproc.ListFilter{Query: "  laptop  "})
+	got, err := svc.List(adminCtx(), domainproc.ListFilter{Query: "  laptop  "})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -261,7 +261,7 @@ func TestServiceListValidation(t *testing.T) {
 			repo := &fakeRepo{}
 			svc := newService(repo)
 
-			_, err := svc.List(context.Background(), tt.filter)
+			_, err := svc.List(adminCtx(), tt.filter)
 			requireFieldError(t, err, tt.field)
 			if repo.listCalled {
 				t.Error("repository List was called for an invalid filter")
@@ -277,7 +277,7 @@ func TestServiceSubmit(t *testing.T) {
 	}
 	svc := newService(repo)
 
-	got, err := svc.Submit(context.Background(), "prc_1")
+	got, err := svc.Submit(adminCtx(), "prc_1")
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
@@ -302,7 +302,7 @@ func TestServiceApproveFromDraft(t *testing.T) {
 	}
 	svc := newService(repo)
 
-	_, err := svc.Approve(context.Background(), "prc_1")
+	_, err := svc.Approve(adminCtx(), "prc_1")
 	if !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Fatalf("Approve() error = %v, want ErrInvalidTransition", err)
 	}
@@ -318,7 +318,7 @@ func TestServiceReject(t *testing.T) {
 	}
 	svc := newService(repo)
 
-	got, err := svc.Reject(context.Background(), "prc_1", "budget exceeded")
+	got, err := svc.Reject(adminCtx(), "prc_1", "budget exceeded")
 	if err != nil {
 		t.Fatalf("Reject() error = %v", err)
 	}
@@ -340,7 +340,7 @@ func TestServiceRejectRequiresReason(t *testing.T) {
 	}
 	svc := newService(repo)
 
-	_, err := svc.Reject(context.Background(), "prc_1", "   ")
+	_, err := svc.Reject(adminCtx(), "prc_1", "   ")
 	requireFieldError(t, err, "reason")
 	if repo.updateCalled {
 		t.Error("repository Update was called with an invalid reason")
@@ -355,7 +355,7 @@ func TestServiceUpdateConflict(t *testing.T) {
 	}
 	svc := newService(repo)
 
-	_, err := svc.Submit(context.Background(), "prc_1")
+	_, err := svc.Submit(adminCtx(), "prc_1")
 	if !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("Submit() error = %v, want ErrConflict", err)
 	}
@@ -365,7 +365,7 @@ func TestServiceListRepositoryError(t *testing.T) {
 	repo := &fakeRepo{listErr: errors.New("boom")}
 	svc := newService(repo)
 
-	_, err := svc.List(context.Background(), domainproc.ListFilter{})
+	_, err := svc.List(adminCtx(), domainproc.ListFilter{})
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("List() error = %v, want boom", err)
 	}

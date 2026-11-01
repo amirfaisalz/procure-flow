@@ -6,13 +6,32 @@ import (
 	"time"
 
 	"github.com/amirfaisalz/procure-flow/internal/domain"
+	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 )
+
+// Audit actions recorded for procurement lifecycle events.
+const (
+	ActionCreated   = "procurement.created"
+	ActionSubmitted = "procurement.submitted"
+	ActionApproved  = "procurement.approved"
+	ActionRejected  = "procurement.rejected"
+	ActionCancelled = "procurement.cancelled"
+)
+
+const auditListLimit = 200
 
 // IDGenerator supplies identifiers for new aggregates.
 type IDGenerator interface {
 	NewID() string
 	NewNumber(now time.Time) string
+}
+
+// UnitOfWork runs a function inside a single storage transaction. When it is
+// nil, writes execute directly; this keeps the in-memory adapter usable while
+// PostgreSQL commits the aggregate and its audit events atomically.
+type UnitOfWork interface {
+	WithinTx(ctx context.Context, fn func(context.Context) error) error
 }
 
 // CreateInput is the application-level command for creating a procurement.
@@ -25,24 +44,55 @@ type CreateInput struct {
 	Currency    string
 }
 
+// Option customises the service.
+type Option func(*Service)
+
+// WithAudit attaches an audit repository and, optionally, a unit of work.
+func WithAudit(repo audit.Repository, uow UnitOfWork) Option {
+	return func(s *Service) {
+		s.audit = repo
+		s.uow = uow
+	}
+}
+
 // Service implements procurement use cases.
 type Service struct {
-	repo domainproc.Repository
-	ids  IDGenerator
-	now  func() time.Time
+	repo  domainproc.Repository
+	audit audit.Repository
+	uow   UnitOfWork
+	ids   IDGenerator
+	now   func() time.Time
 }
 
 // NewService wires the use-case service. A nil clock defaults to time.Now.
-func NewService(repo domainproc.Repository, ids IDGenerator, now func() time.Time) *Service {
+func NewService(repo domainproc.Repository, ids IDGenerator, now func() time.Time, opts ...Option) *Service {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{repo: repo, ids: ids, now: now}
+	service := &Service{repo: repo, ids: ids, now: now}
+	for _, opt := range opts {
+		opt(service)
+	}
+	return service
 }
 
-// Create validates and persists a new draft procurement.
+// Create validates and persists a new draft procurement. The requester is
+// always derived from the authenticated actor, never from client input.
 func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Procurement, error) {
+	actor, err := requireActor(ctx)
+	if err != nil {
+		return domainproc.Procurement{}, err
+	}
+	if !actor.IsAdmin() && !actor.HasRole(RoleRequester) {
+		return domainproc.Procurement{}, domain.ErrForbidden
+	}
+
 	now := s.now().UTC()
+	requester := strings.TrimSpace(input.Requester)
+	if requester == "" {
+		requester = actor.DisplayName()
+	}
+
 	p, err := domainproc.New(
 		s.ids.NewID(),
 		s.ids.NewNumber(now),
@@ -50,7 +100,8 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Pro
 			Title:       input.Title,
 			Description: input.Description,
 			Department:  input.Department,
-			Requester:   input.Requester,
+			Requester:   requester,
+			RequesterID: actor.Subject,
 			Amount:      input.Amount,
 			Currency:    input.Currency,
 		},
@@ -60,7 +111,13 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Pro
 		return domainproc.Procurement{}, err
 	}
 
-	if err := s.repo.Create(ctx, p); err != nil {
+	err = s.withinTx(ctx, func(ctx context.Context) error {
+		if err := s.repo.Create(ctx, p); err != nil {
+			return err
+		}
+		return s.record(ctx, actor, p, ActionCreated, "")
+	})
+	if err != nil {
 		return domainproc.Procurement{}, err
 	}
 	return p, nil
@@ -68,6 +125,13 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Pro
 
 // Get returns one procurement by ID.
 func (s *Service) Get(ctx context.Context, id string) (domainproc.Procurement, error) {
+	if _, err := requireActor(ctx); err != nil {
+		return domainproc.Procurement{}, err
+	}
+	return s.get(ctx, id)
+}
+
+func (s *Service) get(ctx context.Context, id string) (domainproc.Procurement, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return domainproc.Procurement{}, &domain.ValidationError{
@@ -79,6 +143,10 @@ func (s *Service) Get(ctx context.Context, id string) (domainproc.Procurement, e
 
 // List returns a validated, paginated page of procurements.
 func (s *Service) List(ctx context.Context, filter domainproc.ListFilter) (domainproc.ListResult, error) {
+	if _, err := requireActor(ctx); err != nil {
+		return domainproc.ListResult{}, err
+	}
+
 	if filter.Page == 0 {
 		filter.Page = 1
 	}
@@ -109,49 +177,155 @@ func (s *Service) List(ctx context.Context, filter domainproc.ListFilter) (domai
 
 // Submit moves a draft procurement into the approval queue.
 func (s *Service) Submit(ctx context.Context, id string) (domainproc.Procurement, error) {
-	return s.mutate(ctx, id, func(p *domainproc.Procurement, now time.Time) error {
+	return s.mutate(ctx, id, ActionSubmitted, canSubmit, func(p *domainproc.Procurement, now time.Time) error {
 		return p.Submit(now)
 	})
 }
 
 // Approve accepts a submitted procurement.
 func (s *Service) Approve(ctx context.Context, id string) (domainproc.Procurement, error) {
-	return s.mutate(ctx, id, func(p *domainproc.Procurement, now time.Time) error {
+	return s.mutate(ctx, id, ActionApproved, canApprove, func(p *domainproc.Procurement, now time.Time) error {
 		return p.Approve(now)
 	})
 }
 
 // Reject declines a submitted procurement.
 func (s *Service) Reject(ctx context.Context, id, reason string) (domainproc.Procurement, error) {
-	return s.mutate(ctx, id, func(p *domainproc.Procurement, now time.Time) error {
+	return s.mutate(ctx, id, ActionRejected, canApprove, func(p *domainproc.Procurement, now time.Time) error {
 		return p.Reject(now, reason)
 	})
 }
 
 // Cancel closes a draft or submitted procurement.
 func (s *Service) Cancel(ctx context.Context, id string) (domainproc.Procurement, error) {
-	return s.mutate(ctx, id, func(p *domainproc.Procurement, now time.Time) error {
+	return s.mutate(ctx, id, ActionCancelled, canCancel, func(p *domainproc.Procurement, now time.Time) error {
 		return p.Cancel(now)
 	})
+}
+
+// Audit returns the audit trail for one procurement, newest first.
+func (s *Service) Audit(ctx context.Context, id string) ([]audit.Event, error) {
+	if _, err := s.Get(ctx, id); err != nil {
+		return nil, err
+	}
+	if s.audit == nil {
+		return []audit.Event{}, nil
+	}
+	return s.audit.ListByEntity(ctx, audit.EntityProcurement, strings.TrimSpace(id), auditListLimit)
 }
 
 func (s *Service) mutate(
 	ctx context.Context,
 	id string,
+	action string,
+	allow func(Actor, domainproc.Procurement) bool,
 	apply func(*domainproc.Procurement, time.Time) error,
 ) (domainproc.Procurement, error) {
-	p, err := s.Get(ctx, id)
+	actor, err := requireActor(ctx)
 	if err != nil {
 		return domainproc.Procurement{}, err
 	}
 
-	expectedVersion := p.Version
-	if err := apply(&p, s.now().UTC()); err != nil {
-		return domainproc.Procurement{}, err
-	}
+	var result domainproc.Procurement
+	err = s.withinTx(ctx, func(ctx context.Context) error {
+		p, err := s.get(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !allow(actor, p) {
+			return domain.ErrForbidden
+		}
 
-	if err := s.repo.Update(ctx, p, expectedVersion); err != nil {
+		fromStatus := string(p.Status)
+		expectedVersion := p.Version
+		if err := apply(&p, s.now().UTC()); err != nil {
+			return err
+		}
+		if err := s.repo.Update(ctx, p, expectedVersion); err != nil {
+			return err
+		}
+		if err := s.record(ctx, actor, p, action, fromStatus); err != nil {
+			return err
+		}
+		result = p
+		return nil
+	})
+	if err != nil {
 		return domainproc.Procurement{}, err
 	}
-	return p, nil
+	return result, nil
+}
+
+func (s *Service) withinTx(ctx context.Context, fn func(context.Context) error) error {
+	if s.uow == nil {
+		return fn(ctx)
+	}
+	return s.uow.WithinTx(ctx, fn)
+}
+
+func (s *Service) record(ctx context.Context, actor Actor, p domainproc.Procurement, action, fromStatus string) error {
+	if s.audit == nil {
+		return nil
+	}
+	return s.audit.Append(ctx, audit.Event{
+		EntityType: audit.EntityProcurement,
+		EntityID:   p.ID,
+		Action:     action,
+		ActorID:    actor.Subject,
+		ActorName:  actor.DisplayName(),
+		ActorRole:  primaryRole(actor),
+		FromStatus: fromStatus,
+		ToStatus:   string(p.Status),
+		Metadata:   map[string]string{"number": p.Number},
+		OccurredAt: s.now().UTC(),
+	})
+}
+
+// requireActor fails closed when no authenticated actor is present.
+func requireActor(ctx context.Context) (Actor, error) {
+	actor, ok := ActorFrom(ctx)
+	if !ok {
+		return Actor{}, domain.ErrForbidden
+	}
+	return actor, nil
+}
+
+func canSubmit(actor Actor, p domainproc.Procurement) bool {
+	if actor.IsAdmin() {
+		return true
+	}
+	if !actor.HasRole(RoleRequester) {
+		return false
+	}
+	return p.RequesterID == "" || p.RequesterID == actor.Subject
+}
+
+func canApprove(actor Actor, p domainproc.Procurement) bool {
+	if actor.IsAdmin() {
+		return true
+	}
+	if !actor.HasRole(RoleApprover) {
+		return false
+	}
+	department := strings.TrimSpace(actor.Department)
+	return department != "" && strings.EqualFold(department, strings.TrimSpace(p.Department))
+}
+
+func canCancel(actor Actor, p domainproc.Procurement) bool {
+	return actor.IsAdmin() || (p.RequesterID != "" && p.RequesterID == actor.Subject)
+}
+
+func primaryRole(actor Actor) string {
+	switch {
+	case actor.IsAdmin():
+		return RoleAdmin
+	case actor.HasRole(RoleApprover):
+		return RoleApprover
+	case actor.HasRole(RoleRequester):
+		return RoleRequester
+	case actor.HasRole(RoleViewer):
+		return RoleViewer
+	default:
+		return ""
+	}
 }

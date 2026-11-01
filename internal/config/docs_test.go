@@ -14,8 +14,8 @@ func TestLoadDocsDefault(t *testing.T) {
 		want bool
 	}{
 		{name: "development", env: nil, want: true},
-		{name: "staging", env: map[string]string{"APP_ENV": "staging"}, want: true},
-		{name: "production", env: map[string]string{"APP_ENV": "production", "DATABASE_URL": "postgres://localhost/procure"}, want: false},
+		{name: "staging", env: map[string]string{"APP_ENV": "staging", "AUTH_API_KEYS": testAPIKeys}, want: true},
+		{name: "production", env: map[string]string{"APP_ENV": "production", "DATABASE_URL": "postgres://localhost/procure", "AUTH_API_KEYS": testAPIKeys}, want: false},
 	}
 
 	for _, tt := range tests {
@@ -39,7 +39,7 @@ func TestLoadDocsOverride(t *testing.T) {
 	}{
 		{
 			name: "enabled in production",
-			env:  map[string]string{"APP_ENV": "production", "DOCS_ENABLED": "true", "DATABASE_URL": "postgres://localhost/procure"},
+			env:  map[string]string{"APP_ENV": "production", "DOCS_ENABLED": "true", "DATABASE_URL": "postgres://localhost/procure", "AUTH_API_KEYS": testAPIKeys},
 			want: true,
 		},
 		{

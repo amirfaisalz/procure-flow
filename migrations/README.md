@@ -61,6 +61,24 @@ WHERE id = $1 AND version = $2;
 A zero-row result maps to `domain.ErrConflict` (or `domain.ErrNotFound` when the
 row does not exist).
 
+### `audit_events`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `bigint` | identity primary key |
+| `entity_type` | `text` | e.g. `procurement` |
+| `entity_id` | `text` | aggregate identifier |
+| `action` | `text` | e.g. `procurement.approved` |
+| `actor_id` | `text` | authenticated subject |
+| `actor_name` | `text` | display name |
+| `actor_role` | `text` | primary role at the time of the action |
+| `from_status` | `text` | previous status, empty on create |
+| `to_status` | `text` | resulting status |
+| `metadata` | `jsonb` | contextual data |
+| `occurred_at` | `timestamptz` | event time |
+
+The table is append-only: a trigger rejects `UPDATE` and `DELETE`.
+
 ### `schema_migrations`
 
 Managed by the runner: `version text primary key`, `applied_at timestamptz`.

@@ -7,6 +7,8 @@ info:
     Errors use RFC 9457 `application/problem+json`.
 servers:
   - url: http://localhost:8080
+security:
+  - bearerAuth: []
 tags:
   - name: Health
   - name: Procurements
@@ -16,6 +18,7 @@ paths:
       tags: [Health]
       summary: Liveness probe
       operationId: getLiveness
+      security: []
       responses:
         "200":
           description: Process is alive
@@ -32,6 +35,7 @@ paths:
       tags: [Health]
       summary: Readiness probe
       operationId: getReadiness
+      security: []
       responses:
         "200":
           description: All dependencies are usable
@@ -74,6 +78,10 @@ paths:
           description: Case-insensitive search across number, title, description, department, and requester.
           schema: { type: string }
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           description: A page of procurements
           content:
@@ -101,6 +109,10 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateProcurementRequest"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "201":
           description: Created
           headers:
@@ -131,6 +143,10 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ProcurementID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           description: Procurement
           content:
@@ -151,6 +167,10 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ProcurementID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           $ref: "#/components/responses/Procurement"
         "404":
@@ -165,6 +185,10 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ProcurementID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           $ref: "#/components/responses/Procurement"
         "404":
@@ -192,6 +216,10 @@ paths:
                   minLength: 3
                   maxLength: 500
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           $ref: "#/components/responses/Procurement"
         "400":
@@ -210,13 +238,53 @@ paths:
       parameters:
         - $ref: "#/components/parameters/ProcurementID"
       responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "200":
           $ref: "#/components/responses/Procurement"
         "404":
           $ref: "#/components/responses/Problem"
         "409":
           $ref: "#/components/responses/Problem"
+  /api/v1/procurements/{id}/audit:
+    get:
+      tags: [Procurements]
+      summary: Read the procurement audit trail
+      description: Returns append-only lifecycle events, newest first.
+      operationId: listProcurementAudit
+      parameters:
+        - $ref: "#/components/parameters/ProcurementID"
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "200":
+          description: Audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEvent"
+        "404":
+          $ref: "#/components/responses/Problem"
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key or JWT
+      description: |
+        Send either a static API key or an HS256 JWT as `Authorization: Bearer <token>`.
+        API keys are configured with `AUTH_API_KEYS`; JWTs are verified with
+        `AUTH_JWT_SECRET`, `AUTH_JWT_ISSUER`, and `AUTH_JWT_AUDIENCE`.
   parameters:
     ProcurementID:
       name: id
@@ -226,6 +294,18 @@ components:
         type: string
         pattern: "^prc_[a-f0-9]{32}$"
   responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: The caller is not allowed to perform this action
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     Procurement:
       description: Updated procurement
       content:
@@ -249,7 +329,7 @@ components:
     CreateProcurementRequest:
       type: object
       additionalProperties: false
-      required: [title, department, requester, amount, currency]
+      required: [title, department, amount, currency]
       properties:
         title:
           type: string
@@ -266,6 +346,7 @@ components:
           type: string
           minLength: 1
           maxLength: 100
+          description: Optional display name; defaults to the authenticated actor.
         amount:
           type: integer
           format: int64
@@ -318,6 +399,34 @@ components:
         version:
           type: integer
           minimum: 1
+    AuditEvent:
+      type: object
+      required: [id, action, actor_id, actor_name, actor_role, occurred_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        action:
+          type: string
+          example: procurement.approved
+        actor_id:
+          type: string
+        actor_name:
+          type: string
+        actor_role:
+          type: string
+          enum: [admin, approver, requester, viewer, ""]
+        from_status:
+          type: string
+        to_status:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        occurred_at:
+          type: string
+          format: date-time
     PageMeta:
       type: object
       required: [page, page_size, total, total_pages]

@@ -10,6 +10,13 @@
 @baseUrl = http://localhost:8080
 @contentType = application/json
 
+# Authentication is disabled in development by default, so these requests work
+# without credentials. When AUTH_ENABLED=true, add an Authorization header to
+# every /api/v1 request:
+#   Authorization: Bearer <token>
+# The local compose stack ships with `local-admin-token-0123456789`.
+@token = local-admin-token-0123456789
+
 ### Liveness
 GET {{baseUrl}}/healthz
 
@@ -41,6 +48,9 @@ GET {{baseUrl}}/api/v1/procurements?status=submitted&q=laptop&page=1&page_size=1
 
 ### Get procurement by ID
 GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}
+
+### Audit trail (newest first)
+GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/audit
 
 ### Submit procurement
 POST {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/submit

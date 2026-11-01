@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
 )
 
 // Env identifies the deployment environment.
@@ -32,6 +35,26 @@ type Config struct {
 	CORS     CORS
 	Docs     Docs
 	Database Database
+	Auth     Auth
+}
+
+// Auth controls request authentication and role-based authorization.
+type Auth struct {
+	Enabled     bool
+	JWTSecret   string
+	JWTIssuer   string
+	JWTAudience string
+	JWTLeeway   time.Duration
+	APIKeys     []APIKey
+}
+
+// APIKey is a static bearer token bound to a principal.
+type APIKey struct {
+	Token      string
+	Subject    string
+	Name       string
+	Roles      []auth.Role
+	Department string
 }
 
 // Database controls the optional PostgreSQL persistence adapter. An empty URL
@@ -108,6 +131,11 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	authConfig, err := loadAuth(getenv, env)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Env:      env,
 		LogLevel: level,
@@ -115,6 +143,7 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		CORS:     corsConfig,
 		Docs:     docsConfig,
 		Database: databaseConfig,
+		Auth:     authConfig,
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -126,8 +155,22 @@ func (c Config) validate() error {
 	if c.HTTP.RequestTimeout > c.HTTP.WriteTimeout {
 		return fmt.Errorf("HTTP_REQUEST_TIMEOUT: must be less than or equal to HTTP_WRITE_TIMEOUT")
 	}
-	if c.Env.IsProduction() && c.Database.URL == "" {
-		return fmt.Errorf("DATABASE_URL: required in production (the in-memory repository is not durable)")
+	if c.Env.IsProduction() {
+		if c.Database.URL == "" {
+			return fmt.Errorf("DATABASE_URL: required in production (the in-memory repository is not durable)")
+		}
+		if !c.Auth.Enabled {
+			return fmt.Errorf("AUTH_ENABLED: must be true in production")
+		}
+	}
+
+	if c.Auth.Enabled {
+		if c.Auth.JWTSecret != "" && len(c.Auth.JWTSecret) < 32 {
+			return fmt.Errorf("AUTH_JWT_SECRET: must be at least 32 characters")
+		}
+		if len(c.Auth.APIKeys) == 0 && c.Auth.JWTSecret == "" {
+			return fmt.Errorf("AUTH_API_KEYS or AUTH_JWT_SECRET: at least one credential source is required when auth is enabled")
+		}
 	}
 	return nil
 }
@@ -280,6 +323,99 @@ func loadDatabase(getenv func(string) string) (Database, error) {
 	}
 
 	return db, nil
+}
+
+func loadAuth(getenv func(string) string, env Env) (Auth, error) {
+	enabled, err := boolEnv(getenv, "AUTH_ENABLED", env != EnvDevelopment)
+	if err != nil {
+		return Auth{}, err
+	}
+
+	cfg := Auth{
+		Enabled:     enabled,
+		JWTSecret:   strings.TrimSpace(getenv("AUTH_JWT_SECRET")),
+		JWTIssuer:   strings.TrimSpace(getenv("AUTH_JWT_ISSUER")),
+		JWTAudience: strings.TrimSpace(getenv("AUTH_JWT_AUDIENCE")),
+		JWTLeeway:   30 * time.Second,
+	}
+	if cfg.JWTIssuer == "" {
+		cfg.JWTIssuer = "procure-flow"
+	}
+	if cfg.JWTAudience == "" {
+		cfg.JWTAudience = "procure-flow-api"
+	}
+	if cfg.JWTLeeway, err = durationEnv(getenv, "AUTH_JWT_LEEWAY", cfg.JWTLeeway); err != nil {
+		return Auth{}, err
+	}
+
+	cfg.APIKeys, err = parseAPIKeys(getenv("AUTH_API_KEYS"))
+	if err != nil {
+		return Auth{}, err
+	}
+	return cfg, nil
+}
+
+type apiKeyPayload struct {
+	Token      string   `json:"token"`
+	Subject    string   `json:"subject"`
+	Name       string   `json:"name"`
+	Roles      []string `json:"roles"`
+	Department string   `json:"department"`
+}
+
+func parseAPIKeys(raw string) ([]APIKey, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+
+	var payload []apiKeyPayload
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, fmt.Errorf("AUTH_API_KEYS: invalid JSON: %w", err)
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("AUTH_API_KEYS: must contain at least one key")
+	}
+
+	keys := make([]APIKey, 0, len(payload))
+	seen := make(map[string]struct{}, len(payload))
+	for i, item := range payload {
+		token := strings.TrimSpace(item.Token)
+		if len(token) < 16 {
+			return nil, fmt.Errorf("AUTH_API_KEYS[%d]: token must be at least 16 characters", i)
+		}
+		if _, exists := seen[token]; exists {
+			return nil, fmt.Errorf("AUTH_API_KEYS[%d]: duplicate token", i)
+		}
+		seen[token] = struct{}{}
+
+		subject := strings.TrimSpace(item.Subject)
+		if subject == "" {
+			return nil, fmt.Errorf("AUTH_API_KEYS[%d]: subject must not be empty", i)
+		}
+
+		roles, err := auth.ParseRoles(item.Roles)
+		if err != nil {
+			return nil, fmt.Errorf("AUTH_API_KEYS[%d]: %w", i, err)
+		}
+
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			name = subject
+		}
+
+		keys = append(keys, APIKey{
+			Token:      token,
+			Subject:    subject,
+			Name:       name,
+			Roles:      roles,
+			Department: strings.TrimSpace(item.Department),
+		})
+	}
+	return keys, nil
 }
 
 func loadDocs(raw string, env Env) (Docs, error) {

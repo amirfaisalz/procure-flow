@@ -18,9 +18,10 @@ cmd/api
        └─ response                     JSON + RFC 9457 helpers
   └─ internal/application/procurement  (use cases)
   └─ internal/domain/procurement       (aggregate + repository port)
-       └─ internal/infrastructure/memory   (local adapter)
-       └─ internal/infrastructure/postgres (production adapter)
-  └─ internal/platform                 (IDs, request IDs, logging)
+  └─ internal/domain/audit             (append-only audit port)
+       └─ internal/infrastructure/memory   (local adapters)
+       └─ internal/infrastructure/postgres (production adapters)
+  └─ internal/platform                 (IDs, request IDs, logging, auth)
   └─ internal/config                   (environment configuration)
 ```
 
@@ -84,8 +85,44 @@ Both adapters run the same contract suite
 when `TEST_DATABASE_URL` is set and are skipped otherwise.
 
 `postgres.UnitOfWork` puts a `*sql.Tx` in the context. Repositories resolve the
-transaction from the context, so future use cases can write the aggregate and
-its audit events atomically without leaking SQL into the application layer.
+transaction from the context, so the use cases write the aggregate and its
+audit events atomically without leaking SQL into the application layer.
+
+## Authentication and authorization
+
+`internal/platform/auth` verifies credentials and produces a `Principal`:
+
+- static API keys compared with `crypto/subtle.ConstantTimeCompare`;
+- HS256 JWTs with the algorithm pinned to `HS256`, plus `exp`, `nbf`, `iss`,
+  `aud`, and role validation.
+
+The HTTP authentication middleware runs only for `/api/v1/*`. It maps the
+principal to an application `Actor` and stores it in the request context.
+Health probes and API documentation bypass it. When `AUTH_ENABLED=false`, the
+router injects a local admin actor instead.
+
+The application policy fails closed: no actor means `domain.ErrForbidden`.
+
+| Action | Rule |
+| --- | --- |
+| Create | `admin` or `requester` |
+| Get / List / Audit | any authenticated actor |
+| Submit | owner (`requester_id`) or `admin` |
+| Approve / Reject | `admin`, or `approver` whose department matches the request |
+| Cancel | owner or `admin` |
+
+`requester_id` is derived from the token subject, never from client input.
+
+## Audit trail
+
+`internal/domain/audit` defines an append-only port. Every create, submit,
+approve, reject, and cancel appends one event with the actor, role, status
+transition, metadata, and timestamp. The application records the event inside
+the same unit of work as the aggregate write.
+
+On PostgreSQL, `audit_events` has a trigger that rejects `UPDATE` and `DELETE`,
+so history cannot be rewritten even by a compromised application. Events are
+read newest first through `GET /api/v1/procurements/{id}/audit`.
 
 ### Migrations
 
@@ -109,6 +146,7 @@ GET  /openapi.yaml
 POST /api/v1/procurements
 GET  /api/v1/procurements
 GET  /api/v1/procurements/{id}
+GET  /api/v1/procurements/{id}/audit
 POST /api/v1/procurements/{id}/submit
 POST /api/v1/procurements/{id}/approve
 POST /api/v1/procurements/{id}/reject
@@ -147,6 +185,8 @@ RequestID → AccessLog → Recover → SecurityHeaders → CORS → Timeout →
 | `*handler.QueryError` | 400 | `INVALID_QUERY` |
 | `*domain.ValidationError` | 422 | `VALIDATION_ERROR` |
 | `domain.ErrNotFound` | 404 | `NOT_FOUND` |
+| `domain.ErrForbidden` | 403 | `FORBIDDEN` |
+| `auth.ErrUnauthenticated` (middleware) | 401 | `UNAUTHENTICATED` |
 | `domain.ErrConflict` | 409 | `CONFLICT` |
 | `domain.ErrInvalidTransition` | 409 | `INVALID_TRANSITION` |
 | `context.DeadlineExceeded` | 504 | `TIMEOUT` |
@@ -157,9 +197,10 @@ Unknown errors are logged with the request ID and never expose internal detail.
 
 ## Server lifecycle
 
-1. Load and validate configuration (production requires `DATABASE_URL`).
-2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapter.
-3. Build logger, service, health checks, router.
+1. Load and validate configuration (production requires `DATABASE_URL` and
+   authentication).
+2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapters.
+3. Build the credential chain, logger, service, health checks, router.
 4. `net.Listen` first so binding errors surface before serving.
 5. `Serve` in a goroutine.
 6. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
@@ -168,7 +209,10 @@ Unknown errors are logged with the request ID and never expose internal detail.
 ## Testing strategy
 
 - Domain: table-driven invariant and transition tests.
-- Application: fake repository asserting calls and version expectations.
+- Application: fake repository asserting calls and version expectations, plus
+  policy tests for every role and department/ownership combination.
+- Authentication: API-key and JWT acceptance/rejection tables, including
+  expired, wrong-audience, bad-signature, malformed, and `alg: none` tokens.
 - Infrastructure: a shared repository contract run against memory and
   PostgreSQL, covering concurrency, uniqueness, filtering, pagination, and
   context cancellation. PostgreSQL tests are gated by `TEST_DATABASE_URL`.

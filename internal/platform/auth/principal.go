@@ -1,0 +1,90 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+)
+
+// Role is an application role.
+type Role string
+
+const (
+	RoleAdmin     Role = "admin"
+	RoleApprover  Role = "approver"
+	RoleRequester Role = "requester"
+	RoleViewer    Role = "viewer"
+)
+
+// Valid reports whether r is a known role.
+func (r Role) Valid() bool {
+	switch r {
+	case RoleAdmin, RoleApprover, RoleRequester, RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseRoles normalises and validates a list of role names. At least one valid
+// role is required.
+func ParseRoles(raw []string) ([]Role, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("auth: at least one role is required")
+	}
+
+	roles := make([]Role, 0, len(raw))
+	seen := make(map[Role]struct{}, len(raw))
+	for _, value := range raw {
+		role := Role(strings.ToLower(strings.TrimSpace(value)))
+		if !role.Valid() {
+			return nil, fmt.Errorf("auth: unknown role %q", value)
+		}
+		if _, exists := seen[role]; exists {
+			continue
+		}
+		seen[role] = struct{}{}
+		roles = append(roles, role)
+	}
+	return roles, nil
+}
+
+// Principal is the authenticated caller.
+type Principal struct {
+	Subject    string
+	Name       string
+	Roles      []Role
+	Department string
+}
+
+// HasRole reports whether the principal holds role.
+func (p Principal) HasRole(role Role) bool {
+	for _, held := range p.Roles {
+		if held == role {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAdmin reports whether the principal holds the admin role.
+func (p Principal) IsAdmin() bool {
+	return p.HasRole(RoleAdmin)
+}
+
+// ErrUnauthenticated is returned when a request carries no valid credentials.
+var ErrUnauthenticated = errors.New("unauthenticated")
+
+type principalKey struct{}
+
+// WithPrincipal stores the authenticated principal in ctx.
+func WithPrincipal(ctx context.Context, principal Principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, principal)
+}
+
+// FromContext returns the principal stored by the authentication middleware.
+func FromContext(ctx context.Context) (Principal, bool) {
+	principal, ok := ctx.Value(principalKey{}).(Principal)
+	return principal, ok
+}

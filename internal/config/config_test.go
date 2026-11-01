@@ -70,6 +70,7 @@ func TestLoadOverrides(t *testing.T) {
 		"HTTP_MAX_HEADER_BYTES":    "2048",
 		"CORS_ALLOWED_ORIGINS":     " https://app.example.com , http://localhost:3000 ",
 		"DATABASE_URL":             "postgres://localhost/procure",
+		"AUTH_API_KEYS":            testAPIKeys,
 	}))
 	if err != nil {
 		t.Fatalf("LoadFrom() error = %v", err)

@@ -13,6 +13,7 @@ var (
 	ErrNotFound          = errors.New("resource not found")
 	ErrConflict          = errors.New("resource conflict")
 	ErrInvalidTransition = errors.New("invalid status transition")
+	ErrForbidden         = errors.New("forbidden")
 )
 
 // ValidationError describes one or more invalid input fields.

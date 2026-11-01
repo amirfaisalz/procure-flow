@@ -1,0 +1,78 @@
+package auth
+
+import (
+	"context"
+	"crypto/subtle"
+	"net/http"
+	"strings"
+)
+
+// Authenticator resolves the caller identity from an HTTP request.
+type Authenticator interface {
+	Authenticate(ctx context.Context, r *http.Request) (Principal, error)
+}
+
+// Chain tries authenticators in order and returns the first success.
+type Chain []Authenticator
+
+// Authenticate implements Authenticator.
+func (c Chain) Authenticate(ctx context.Context, r *http.Request) (Principal, error) {
+	for _, authenticator := range c {
+		if authenticator == nil {
+			continue
+		}
+		principal, err := authenticator.Authenticate(ctx, r)
+		if err == nil {
+			return principal, nil
+		}
+		if err != ErrUnauthenticated {
+			return Principal{}, err
+		}
+	}
+	return Principal{}, ErrUnauthenticated
+}
+
+// APIKey is a static bearer token bound to a principal.
+type APIKey struct {
+	Token     string
+	Principal Principal
+}
+
+// APIKeyAuthenticator authenticates static API keys with constant-time
+// comparison. It is intended for service-to-service and local testing.
+type APIKeyAuthenticator struct {
+	keys []APIKey
+}
+
+// NewAPIKeyAuthenticator copies keys into a new authenticator.
+func NewAPIKeyAuthenticator(keys []APIKey) *APIKeyAuthenticator {
+	copied := make([]APIKey, len(keys))
+	copy(copied, keys)
+	return &APIKeyAuthenticator{keys: copied}
+}
+
+// Authenticate implements Authenticator.
+func (a *APIKeyAuthenticator) Authenticate(_ context.Context, r *http.Request) (Principal, error) {
+	token := tokenFromRequest(r)
+	if token == "" {
+		return Principal{}, ErrUnauthenticated
+	}
+
+	for _, key := range a.keys {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(key.Token)) == 1 {
+			return key.Principal, nil
+		}
+	}
+	return Principal{}, ErrUnauthenticated
+}
+
+func tokenFromRequest(r *http.Request) string {
+	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
+		const prefix = "bearer "
+		if len(header) > len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {
+			return strings.TrimSpace(header[len(prefix):])
+		}
+		return ""
+	}
+	return strings.TrimSpace(r.Header.Get("X-API-Key"))
+}

@@ -33,7 +33,7 @@ func CORS(allowedOrigins []string) Middleware {
 			headers := w.Header()
 			headers.Set("Access-Control-Allow-Origin", origin)
 			headers.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			headers.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-Request-ID")
 			headers.Set("Access-Control-Expose-Headers", "X-Request-ID")
 			headers.Set("Access-Control-Max-Age", "600")
 

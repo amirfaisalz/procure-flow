@@ -1,0 +1,15 @@
+package memory_test
+
+import (
+	"testing"
+
+	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
+	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
+	"github.com/amirfaisalz/procure-flow/internal/infrastructure/repositorytest"
+)
+
+func TestAuditRepositoryContract(t *testing.T) {
+	repositorytest.RunAudit(t, func(t *testing.T) audit.Repository {
+		return memory.NewAuditRepository()
+	})
+}

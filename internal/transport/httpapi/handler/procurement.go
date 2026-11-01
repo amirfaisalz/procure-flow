@@ -32,6 +32,7 @@ type procurementResponse struct {
 	Description     string    `json:"description"`
 	Department      string    `json:"department"`
 	Requester       string    `json:"requester"`
+	RequesterID     string    `json:"requester_id,omitempty"`
 	Amount          int64     `json:"amount"`
 	Currency        string    `json:"currency"`
 	Status          string    `json:"status"`
@@ -39,6 +40,18 @@ type procurementResponse struct {
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 	Version         int       `json:"version"`
+}
+
+type auditEventResponse struct {
+	ID         int64             `json:"id"`
+	Action     string            `json:"action"`
+	ActorID    string            `json:"actor_id"`
+	ActorName  string            `json:"actor_name"`
+	ActorRole  string            `json:"actor_role"`
+	FromStatus string            `json:"from_status,omitempty"`
+	ToStatus   string            `json:"to_status,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	OccurredAt time.Time         `json:"occurred_at"`
 }
 
 type pageMeta struct {
@@ -122,6 +135,31 @@ func (h *Procurement) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, toResponse(got))
+}
+
+// Audit handles GET /api/v1/procurements/{id}/audit.
+func (h *Procurement) Audit(w http.ResponseWriter, r *http.Request) {
+	events, err := h.service.Audit(r.Context(), r.PathValue("id"))
+	if err != nil {
+		WriteError(w, r, h.logger, err)
+		return
+	}
+
+	items := make([]auditEventResponse, len(events))
+	for i, event := range events {
+		items[i] = auditEventResponse{
+			ID:         event.ID,
+			Action:     event.Action,
+			ActorID:    event.ActorID,
+			ActorName:  event.ActorName,
+			ActorRole:  event.ActorRole,
+			FromStatus: event.FromStatus,
+			ToStatus:   event.ToStatus,
+			Metadata:   event.Metadata,
+			OccurredAt: event.OccurredAt,
+		}
+	}
+	response.JSON(w, http.StatusOK, items)
 }
 
 // Submit handles POST /api/v1/procurements/{id}/submit.
@@ -213,6 +251,7 @@ func toResponse(p procurement.Procurement) procurementResponse {
 		Description:     p.Description,
 		Department:      p.Department,
 		Requester:       p.Requester,
+		RequesterID:     p.RequesterID,
 		Amount:          p.Amount,
 		Currency:        p.Currency,
 		Status:          string(p.Status),

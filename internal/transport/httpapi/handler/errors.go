@@ -77,6 +77,14 @@ func WriteError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err
 			"the requested resource does not exist",
 		))
 		return
+	case errors.Is(err, domain.ErrForbidden):
+		response.WriteProblem(w, r, response.NewProblem(
+			http.StatusForbidden,
+			"FORBIDDEN",
+			"Forbidden",
+			"you are not allowed to perform this action",
+		))
+		return
 	case errors.Is(err, domain.ErrInvalidTransition):
 		response.WriteProblem(w, r, response.NewProblem(
 			http.StatusConflict,

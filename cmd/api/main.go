@@ -13,9 +13,11 @@ import (
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
+	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/postgres"
+	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
 	"github.com/amirfaisalz/procure-flow/internal/platform/id"
 	"github.com/amirfaisalz/procure-flow/internal/platform/logging"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
@@ -42,24 +44,41 @@ func run() error {
 	logger := logging.New(cfg.LogLevel, string(cfg.Env), os.Stdout)
 	slog.SetDefault(logger)
 
-	repo, ping, closeRepository, err := openRepository(cfg, logger)
+	store, err := openStorage(cfg, logger)
 	if err != nil {
 		return err
 	}
-	if closeRepository != nil {
-		defer func() { _ = closeRepository() }()
+	if store.close != nil {
+		defer func() { _ = store.close() }()
 	}
 
-	service := app.NewService(repo, id.NewGenerator(), nil)
+	service := app.NewService(
+		store.procurements,
+		id.NewGenerator(),
+		nil,
+		app.WithAudit(store.audit, store.uow),
+	)
 	health := handler.NewHealth(version, map[string]handler.Check{
-		"repository": ping,
+		"repository": store.ping,
 	})
 
+	var authenticator auth.Authenticator
+	if cfg.Auth.Enabled {
+		authenticator = newAuthenticator(cfg.Auth)
+		logger.Info("authentication enabled",
+			slog.Bool("api_keys", len(cfg.Auth.APIKeys) > 0),
+			slog.Bool("jwt", cfg.Auth.JWTSecret != ""),
+		)
+	} else {
+		logger.Warn("authentication disabled; all requests act as a local admin")
+	}
+
 	router := httpapi.NewRouter(httpapi.Dependencies{
-		Config:      cfg,
-		Logger:      logger,
-		Procurement: service,
-		Health:      health,
+		Config:        cfg,
+		Logger:        logger,
+		Procurement:   service,
+		Health:        health,
+		Authenticator: authenticator,
 	})
 	server := httpapi.NewServer(cfg.HTTP, router, logger)
 
@@ -80,14 +99,27 @@ func run() error {
 	return httpapi.Run(ctx, listener, server, cfg.HTTP.ShutdownTimeout, logger)
 }
 
-// openRepository selects PostgreSQL when DATABASE_URL is set and falls back to
-// the in-memory adapter otherwise. Production requires a database (enforced by
+// storage bundles the adapters selected at startup.
+type storage struct {
+	procurements domainproc.Repository
+	audit        audit.Repository
+	uow          app.UnitOfWork
+	ping         func(context.Context) error
+	close        func() error
+}
+
+// openStorage selects PostgreSQL when DATABASE_URL is set and falls back to the
+// in-memory adapters otherwise. Production requires a database (enforced by
 // config validation).
-func openRepository(cfg config.Config, logger *slog.Logger) (domainproc.Repository, func(context.Context) error, func() error, error) {
+func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 	if cfg.Database.URL == "" {
 		repo := memory.NewProcurementRepository()
 		logger.Warn("using in-memory repository; data will not survive a restart")
-		return repo, repo.Ping, nil, nil
+		return storage{
+			procurements: repo,
+			audit:        memory.NewAuditRepository(),
+			ping:         repo.Ping,
+		}, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -101,17 +133,56 @@ func openRepository(cfg config.Config, logger *slog.Logger) (domainproc.Reposito
 		ConnMaxIdleTime: cfg.Database.ConnMaxIdleTime,
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("connect to postgres: %w", err)
+		return storage{}, fmt.Errorf("connect to postgres: %w", err)
 	}
 
 	if cfg.Database.AutoMigrate {
 		if err := migrations.Up(ctx, db); err != nil {
 			_ = db.Close()
-			return nil, nil, nil, fmt.Errorf("apply migrations: %w", err)
+			return storage{}, fmt.Errorf("apply migrations: %w", err)
 		}
 		logger.Info("database migrations applied")
 	}
 
 	logger.Info("using postgres repository")
-	return postgres.NewProcurementRepository(db), db.PingContext, db.Close, nil
+	return storage{
+		procurements: postgres.NewProcurementRepository(db),
+		audit:        postgres.NewAuditRepository(db),
+		uow:          postgres.NewUnitOfWork(db),
+		ping:         db.PingContext,
+		close:        db.Close,
+	}, nil
+}
+
+// newAuthenticator builds the credential chain from configuration. Static API
+// keys are tried first, then HS256 JWTs.
+func newAuthenticator(cfg config.Auth) auth.Authenticator {
+	chain := auth.Chain{}
+
+	if len(cfg.APIKeys) > 0 {
+		keys := make([]auth.APIKey, len(cfg.APIKeys))
+		for i, key := range cfg.APIKeys {
+			keys[i] = auth.APIKey{
+				Token: key.Token,
+				Principal: auth.Principal{
+					Subject:    key.Subject,
+					Name:       key.Name,
+					Roles:      key.Roles,
+					Department: key.Department,
+				},
+			}
+		}
+		chain = append(chain, auth.NewAPIKeyAuthenticator(keys))
+	}
+
+	if cfg.JWTSecret != "" {
+		chain = append(chain, auth.NewJWTAuthenticator(auth.JWTConfig{
+			Secret:   []byte(cfg.JWTSecret),
+			Issuer:   cfg.JWTIssuer,
+			Audience: cfg.JWTAudience,
+			Leeway:   cfg.JWTLeeway,
+		}))
+	}
+
+	return chain
 }

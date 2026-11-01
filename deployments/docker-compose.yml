@@ -36,6 +36,9 @@ services:
       DOCS_ENABLED: "true"
       DATABASE_URL: "postgres://procure:procure@db:5432/procure?sslmode=disable"
       DB_AUTO_MIGRATE: "true"
+      AUTH_ENABLED: "true"
+      # Local-only credentials. Replace these before exposing the stack.
+      AUTH_API_KEYS: '[{"token":"local-admin-token-0123456789","subject":"user_admin","name":"Local Admin","roles":["admin"]},{"token":"local-approver-token-0123456789","subject":"user_fin","name":"Finance Approver","roles":["approver"],"department":"Engineering"}]'
     depends_on:
       db:
         condition: service_healthy

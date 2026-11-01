@@ -125,8 +125,9 @@ func TestLoadDatabaseRequiredInProduction(t *testing.T) {
 	}
 
 	if _, err := config.LoadFrom(env(map[string]string{
-		"APP_ENV":      "production",
-		"DATABASE_URL": "postgres://localhost/procure",
+		"APP_ENV":       "production",
+		"DATABASE_URL":  "postgres://localhost/procure",
+		"AUTH_API_KEYS": testAPIKeys,
 	})); err != nil {
 		t.Errorf("LoadFrom() with DATABASE_URL error = %v, want nil", err)
 	}

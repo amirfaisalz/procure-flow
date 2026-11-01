@@ -106,6 +106,7 @@ type procurementBody struct {
 	Description     string    `json:"description"`
 	Department      string    `json:"department"`
 	Requester       string    `json:"requester"`
+	RequesterID     string    `json:"requester_id"`
 	Amount          int64     `json:"amount"`
 	Currency        string    `json:"currency"`
 	Status          string    `json:"status"`
