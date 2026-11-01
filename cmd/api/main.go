@@ -56,6 +56,10 @@ func run() error {
 	logger := logging.New(cfg.LogLevel, string(cfg.Env), os.Stdout)
 	slog.SetDefault(logger)
 
+	if cfg.Auth.JWTSecretGenerated {
+		logger.Warn("AUTH_JWT_SECRET is unset; generated an ephemeral development signing key (sessions reset on restart)")
+	}
+
 	store, err := openStorage(cfg, logger)
 	if err != nil {
 		return err
@@ -277,10 +281,33 @@ type storage struct {
 func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 	if cfg.Database.URL == "" {
 		repo := memory.NewProcurementRepository()
+		users := memory.NewUserRepository()
 		logger.Warn("using in-memory repository; data will not survive a restart")
+
+		// Local runs stay login-protected: seed the demo accounts so `make run`
+		// is usable without a database. Production always has DATABASE_URL and
+		// uses cmd/seed instead.
+		if cfg.Auth.Enabled && cfg.Env == config.EnvDevelopment {
+			seeded, err := authapp.SeedDemoAccounts(
+				context.Background(), users, password.NewDefault(),
+				id.NewGenerator().NewUserID, authapp.DemoPassword, time.Now,
+			)
+			if err != nil {
+				return storage{}, fmt.Errorf("seed development accounts: %w", err)
+			}
+			emails := make([]string, len(seeded))
+			for i, account := range seeded {
+				emails[i] = account.Email
+			}
+			logger.Warn("development login accounts seeded in memory",
+				slog.Any("emails", emails),
+				slog.String("password", authapp.DemoPassword),
+			)
+		}
+
 		return storage{
 			procurements: repo,
-			users:        memory.NewUserRepository(),
+			users:        users,
 			audit:        memory.NewAuditRepository(),
 			idempotency:  memory.NewIdempotencyRepository(),
 			outbox:       memory.NewOutboxRepository(),

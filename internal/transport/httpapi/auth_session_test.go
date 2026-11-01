@@ -283,3 +283,47 @@ func TestLoginRejectsMalformedBody(t *testing.T) {
 		t.Errorf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestEveryAPIRouteRequiresLogin(t *testing.T) {
+	router := buildSessionRouter(t, nil)
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/procurements"},
+		{http.MethodPost, "/api/v1/procurements"},
+		{http.MethodGet, "/api/v1/procurements/prc_0123456789abcdef0123456789abcdef"},
+		{http.MethodGet, "/api/v1/procurements/prc_0123456789abcdef0123456789abcdef/audit"},
+		{http.MethodPost, "/api/v1/procurements/prc_0123456789abcdef0123456789abcdef/submit"},
+		{http.MethodPost, "/api/v1/procurements/prc_0123456789abcdef0123456789abcdef/approve"},
+		{http.MethodPost, "/api/v1/procurements/prc_0123456789abcdef0123456789abcdef/reject"},
+		{http.MethodPost, "/api/v1/procurements/prc_0123456789abcdef0123456789abcdef/cancel"},
+		{http.MethodGet, "/api/v1/auth/me"},
+		{http.MethodGet, "/api/v1/unknown"},
+	}
+
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			rec := doRequestWithHeaders(router, route.method, route.path, "", "", nil)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401; body = %s", rec.Code, rec.Body.String())
+			}
+			problem := decodeBody[problemBody](t, rec)
+			if problem.Code != "UNAUTHENTICATED" {
+				t.Errorf("code = %q, want UNAUTHENTICATED", problem.Code)
+			}
+		})
+	}
+}
+
+func TestPublicEndpointsStayOpen(t *testing.T) {
+	router := buildSessionRouter(t, nil)
+
+	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+		rec := doRequestWithHeaders(router, http.MethodGet, path, "", "", nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, want 200", path, rec.Code)
+		}
+	}
+}

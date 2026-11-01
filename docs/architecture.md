@@ -108,8 +108,11 @@ audit events atomically without leaking SQL into the application layer.
 - HS256 JWTs with the algorithm pinned to `HS256`, plus `exp`, `nbf`, `iss`,
   `aud`, and role validation.
 
-The HTTP authentication middleware runs only for `/api/v1/*`. It maps the
-principal to an application `Actor` and stores it in the request context.
+Authentication is enabled by default in every environment; only development may
+disable it, and staging and production refuse to start without it. The HTTP
+authentication middleware runs for every `/api/v1/*` route except login and
+logout. It maps the principal to an application `Actor` and stores it in the
+request context.
 Health probes, API documentation, and login/logout bypass it. When
 `AUTH_ENABLED=false`, the router injects a local admin actor instead.
 

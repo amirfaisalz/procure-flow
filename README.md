@@ -203,9 +203,19 @@ No containers needed for the in-memory mode:
 make run
 ```
 
-Data lives in memory and disappears with the process. `APP_ENV=production`
-refuses to start without `DATABASE_URL`, so a misconfigured deploy fails loudly
-instead of silently losing writes.
+Data lives in memory and disappears with the process. Authentication is on by
+default: the API generates an ephemeral signing key and seeds four demo accounts
+in memory, so log in with `admin@procure.local` / `demo-password-123` before
+calling `/api/v1`:
+
+```bash
+curl -s -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@procure.local","password":"demo-password-123"}'
+```
+
+`APP_ENV=production` refuses to start without `DATABASE_URL`, so a misconfigured
+deploy fails loudly instead of silently losing writes.
 
 For the full stack on the host:
 
@@ -339,9 +349,10 @@ When both a cookie and an `Authorization` header are present, the header wins.
 Ownership is recorded as `requester_id`, derived from the token subject rather
 than the request body. Non-admin approvers cannot approve their own requests;
 admins may, as an explicit override. Authorization fails closed: a missing actor
-is forbidden, and a missing authenticator rejects every API call. With
-`AUTH_ENABLED=false` the router injects a local admin actor so development keeps
-working without credentials — never use that mode in production.
+is forbidden, and a missing authenticator rejects every API call. Login is
+required in every environment; only development accepts `AUTH_ENABLED=false`,
+which injects a local admin actor, while staging and production refuse to start
+without authentication.
 
 ### Idempotency
 
@@ -379,8 +390,8 @@ Environment variables only; `.env` is not read automatically. The essentials:
 | `APP_ENV` | `development` | `production` turns on strict preconditions |
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `DATABASE_URL` | *(empty)* | Empty selects the in-memory repository |
-| `AUTH_ENABLED` | platform-dependent | `true` in staging/production |
-| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | One is required in production; the secret enables login |
+| `AUTH_ENABLED` | `true` | Every `/api/v1` route needs a login; development may opt out |
+| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | Credentials; development generates a temporary secret |
 | `AUTH_SESSION_TTL` | `8h` | Login cookie lifetime |
 | `AUTH_COOKIE_SECURE` | `true` outside development | Keep `true` behind TLS |
 | `SEED_PASSWORD` | demo default outside production | Password for seeded accounts |

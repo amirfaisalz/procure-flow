@@ -19,14 +19,70 @@ func TestLoadAuthDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFrom() error = %v", err)
 	}
-	if cfg.Auth.Enabled {
-		t.Error("Auth.Enabled = true in development, want false")
+	if !cfg.Auth.Enabled {
+		t.Error("Auth.Enabled = false in development, want true so the API requires login")
+	}
+	if cfg.Auth.JWTSecret == "" || !cfg.Auth.JWTSecretGenerated {
+		t.Error("development secret was not generated")
+	}
+	if len(cfg.Auth.JWTSecret) < 32 {
+		t.Errorf("generated secret length = %d, want at least 32", len(cfg.Auth.JWTSecret))
 	}
 	if cfg.Auth.JWTIssuer != "procure-flow" || cfg.Auth.JWTAudience != "procure-flow-api" {
 		t.Errorf("JWT issuer/audience = %q/%q, want defaults", cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience)
 	}
 	if cfg.Auth.JWTLeeway != 30*time.Second {
 		t.Errorf("JWTLeeway = %v, want 30s", cfg.Auth.JWTLeeway)
+	}
+}
+
+func TestLoadAuthDevelopmentSecretIsEphemeral(t *testing.T) {
+	first, err := config.LoadFrom(env(nil))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	second, err := config.LoadFrom(env(nil))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if first.Auth.JWTSecret == second.Auth.JWTSecret {
+		t.Error("generated development secrets are identical; they must be random")
+	}
+}
+
+func TestLoadAuthExplicitSecretIsNotGenerated(t *testing.T) {
+	cfg, err := config.LoadFrom(env(map[string]string{
+		"AUTH_JWT_SECRET": "0123456789abcdef0123456789abcdef",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if cfg.Auth.JWTSecretGenerated {
+		t.Error("JWTSecretGenerated = true, want false for an explicit secret")
+	}
+}
+
+func TestLoadAuthDisabledOnlyAllowedInDevelopment(t *testing.T) {
+	_, err := config.LoadFrom(env(map[string]string{
+		"APP_ENV":      "staging",
+		"AUTH_ENABLED": "false",
+	}))
+	if err == nil {
+		t.Fatal("LoadFrom() error = nil, want staging to reject AUTH_ENABLED=false")
+	}
+	if !strings.Contains(err.Error(), "AUTH_ENABLED") {
+		t.Errorf("error = %q, want it to mention AUTH_ENABLED", err)
+	}
+
+	dev, err := config.LoadFrom(env(map[string]string{"AUTH_ENABLED": "false"}))
+	if err != nil {
+		t.Fatalf("development AUTH_ENABLED=false error = %v", err)
+	}
+	if dev.Auth.Enabled {
+		t.Error("Auth.Enabled = true, want the explicit false")
+	}
+	if dev.Auth.JWTSecretGenerated {
+		t.Error("JWTSecretGenerated = true while auth is disabled")
 	}
 }
 
@@ -67,8 +123,11 @@ func TestLoadAuthEnabled(t *testing.T) {
 	}
 }
 
-func TestLoadAuthRequiresCredentialsWhenEnabled(t *testing.T) {
-	_, err := config.LoadFrom(env(map[string]string{"AUTH_ENABLED": "true"}))
+func TestLoadAuthRequiresCredentialsOutsideDevelopment(t *testing.T) {
+	_, err := config.LoadFrom(env(map[string]string{
+		"APP_ENV":      "staging",
+		"AUTH_ENABLED": "true",
+	}))
 	if err == nil {
 		t.Fatal("LoadFrom() error = nil, want error")
 	}

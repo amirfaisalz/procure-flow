@@ -18,7 +18,8 @@ info:
     `POST /api/v1/auth/login` exchanges an email and password for a signed JWT
     delivered as an `HttpOnly` session cookie; `GET /api/v1/auth/me` reports the
     current account. Static API keys and bearer JWTs keep working for
-    service-to-service calls.
+    service-to-service calls. Every `/api/v1` route except login and logout
+    requires one of those credentials; anonymous requests receive `401`.
 servers:
   - url: http://localhost:8080
 security:

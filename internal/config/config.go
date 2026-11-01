@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -107,7 +109,11 @@ type Auth struct {
 	SessionTTL   time.Duration
 	CookieName   string
 	CookieSecure bool
-	APIKeys      []APIKey
+	// JWTSecretGenerated reports that a throwaway development signing key was
+	// created because AUTH_JWT_SECRET was unset. Sessions do not survive a
+	// restart in that mode.
+	JWTSecretGenerated bool
+	APIKeys            []APIKey
 }
 
 // APIKey is a static bearer token bound to a principal.
@@ -302,13 +308,11 @@ func (c Config) validateServer() error {
 	if c.RateLimit.Enabled && c.RateLimit.Store == RateLimitStoreRedis && c.Redis.URL == "" {
 		return fmt.Errorf("RATE_LIMIT_STORE: redis requires REDIS_URL")
 	}
-	if c.Env.IsProduction() {
-		if c.Database.URL == "" {
-			return fmt.Errorf("DATABASE_URL: required in production (the in-memory repository is not durable)")
-		}
-		if !c.Auth.Enabled {
-			return fmt.Errorf("AUTH_ENABLED: must be true in production")
-		}
+	if c.Env.IsProduction() && c.Database.URL == "" {
+		return fmt.Errorf("DATABASE_URL: required in production (the in-memory repository is not durable)")
+	}
+	if c.Env != EnvDevelopment && !c.Auth.Enabled {
+		return fmt.Errorf("AUTH_ENABLED: must be true outside development")
 	}
 
 	if c.Auth.Enabled {
@@ -642,7 +646,9 @@ func loadDatabase(getenv func(string) string) (Database, error) {
 }
 
 func loadAuth(getenv func(string) string, env Env) (Auth, error) {
-	enabled, err := boolEnv(getenv, "AUTH_ENABLED", env != EnvDevelopment)
+	// Authentication is on by default everywhere; only development may opt out
+	// explicitly, and the router then treats every caller as a local admin.
+	enabled, err := boolEnv(getenv, "AUTH_ENABLED", true)
 	if err != nil {
 		return Auth{}, err
 	}
@@ -680,7 +686,27 @@ func loadAuth(getenv func(string) string, env Env) (Auth, error) {
 	if err != nil {
 		return Auth{}, err
 	}
+
+	// A fresh checkout must be able to log in without configuration. The secret
+	// is ephemeral, so development sessions simply expire on restart.
+	if cfg.Enabled && env == EnvDevelopment && cfg.JWTSecret == "" {
+		secret, err := developmentSecret()
+		if err != nil {
+			return Auth{}, err
+		}
+		cfg.JWTSecret = secret
+		cfg.JWTSecretGenerated = true
+	}
 	return cfg, nil
+}
+
+// developmentSecret returns a random HS256 key for local runs.
+func developmentSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("AUTH_JWT_SECRET: generate development secret: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 type apiKeyPayload struct {

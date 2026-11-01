@@ -55,9 +55,9 @@ tables below with inline comments.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `AUTH_ENABLED` | `true` in staging/production, `false` in development | Require authentication |
+| `AUTH_ENABLED` | `true` | Require a login for every `/api/v1` route |
 | `AUTH_API_KEYS` | *(empty)* | JSON array of static API keys |
-| `AUTH_JWT_SECRET` | *(empty)* | HS256 secret, at least 32 characters |
+| `AUTH_JWT_SECRET` | *(generated in development)* | HS256 secret, at least 32 characters |
 | `AUTH_JWT_ISSUER` | `procure-flow` | Required JWT `iss` |
 | `AUTH_JWT_AUDIENCE` | `procure-flow-api` | Required JWT `aud` |
 | `AUTH_JWT_LEEWAY` | `30s` | Clock-skew tolerance |
@@ -149,8 +149,10 @@ precondition is missing:
 - `RATE_LIMIT_STORE=redis` requires `REDIS_URL`, and `REDIS_URL` must use the
   `redis://` or `rediss://` scheme.
 - Webhook URLs must use `http://` or `https://`.
-- Production requires `DATABASE_URL`, `AUTH_ENABLED=true`, and at least one of
-  `AUTH_API_KEYS` or `AUTH_JWT_SECRET`.
+- Staging and production require `AUTH_ENABLED=true` and at least one of
+  `AUTH_API_KEYS` or `AUTH_JWT_SECRET`; production also requires `DATABASE_URL`.
+- In development, an unset `AUTH_JWT_SECRET` is replaced by a random ephemeral
+  secret so login works out of the box. Sessions do not survive a restart.
 
 ## Profiles
 
@@ -161,7 +163,10 @@ make run
 ```
 
 `DATABASE_URL` is empty, so the API uses the in-memory repository. All state is
-lost on exit. Authentication and rate limiting default to off in `development`.
+lost on exit. Authentication stays on: a throwaway signing key is generated and
+the four demo accounts are seeded in memory, so log in with
+`admin@procure.local` / `demo-password-123` before calling `/api/v1`.
+Rate limiting defaults to off in `development`.
 
 ### Full local stack
 
@@ -180,7 +185,8 @@ make worker   # second terminal
 ```
 
 This enables PostgreSQL persistence, shared rate limiting, the read cache, and
-the outbox relay plus worker. To log in, seed the demo accounts first:
+the outbox relay plus worker. The API now reads accounts from PostgreSQL, so seed
+them first:
 
 ```bash
 make seed DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'

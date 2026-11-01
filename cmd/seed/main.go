@@ -16,7 +16,6 @@ import (
 
 	authapp "github.com/amirfaisalz/procure-flow/internal/application/auth"
 	"github.com/amirfaisalz/procure-flow/internal/config"
-	"github.com/amirfaisalz/procure-flow/internal/domain/user"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/postgres"
 	"github.com/amirfaisalz/procure-flow/internal/platform/id"
 	"github.com/amirfaisalz/procure-flow/internal/platform/logging"
@@ -73,33 +72,13 @@ func run() error {
 	repository := postgres.NewUserRepository(db)
 	hasher := password.NewDefault()
 	ids := id.NewGenerator()
-	accounts := authapp.DemoAccounts()
 
-	for _, account := range accounts {
-		hash, err := hasher.Hash(plain)
-		if err != nil {
-			return fmt.Errorf("hash password for %s: %w", account.Email, err)
-		}
+	seeded, err := authapp.SeedDemoAccounts(ctx, repository, hasher, ids.NewUserID, plain, time.Now)
+	if err != nil {
+		return err
+	}
 
-		now := time.Now().UTC()
-		record := user.User{
-			ID:           ids.NewUserID(),
-			Email:        account.Email,
-			Name:         account.Name,
-			PasswordHash: hash,
-			Roles:        account.Roles,
-			Department:   account.Department,
-			Active:       true,
-			CreatedAt:    now,
-			UpdatedAt:    now,
-		}
-		if err := record.Validate(); err != nil {
-			return fmt.Errorf("account %s: %w", account.Email, err)
-		}
-		if err := repository.Upsert(ctx, record); err != nil {
-			return fmt.Errorf("seed %s: %w", account.Email, err)
-		}
-
+	for _, account := range seeded {
 		logger.Info("account seeded",
 			slog.String("email", account.Email),
 			slog.Any("roles", account.Roles),
@@ -108,7 +87,7 @@ func run() error {
 	}
 
 	logger.Info("seeding complete",
-		slog.Int("accounts", len(accounts)),
+		slog.Int("accounts", len(seeded)),
 		slog.Bool("default_password", strings.TrimSpace(os.Getenv("SEED_PASSWORD")) == ""),
 	)
 	return nil
