@@ -14,12 +14,15 @@ import (
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
+	"github.com/amirfaisalz/procure-flow/internal/domain/idempotency"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/postgres"
 	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
 	"github.com/amirfaisalz/procure-flow/internal/platform/id"
 	"github.com/amirfaisalz/procure-flow/internal/platform/logging"
+	"github.com/amirfaisalz/procure-flow/internal/platform/metrics"
+	"github.com/amirfaisalz/procure-flow/internal/platform/ratelimit"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 	"github.com/amirfaisalz/procure-flow/migrations"
@@ -73,12 +76,25 @@ func run() error {
 		logger.Warn("authentication disabled; all requests act as a local admin")
 	}
 
+	registry := metrics.NewRegistry()
+	var limiter *ratelimit.Limiter
+	if cfg.RateLimit.Enabled {
+		limiter = ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
+		logger.Info("rate limiting enabled",
+			slog.Float64("requests_per_second", cfg.RateLimit.RequestsPerSecond),
+			slog.Int("burst", cfg.RateLimit.Burst),
+		)
+	}
+
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:        cfg,
 		Logger:        logger,
 		Procurement:   service,
 		Health:        health,
 		Authenticator: authenticator,
+		Idempotency:   store.idempotency,
+		RateLimiter:   limiter,
+		Metrics:       registry,
 	})
 	server := httpapi.NewServer(cfg.HTTP, router, logger)
 
@@ -103,6 +119,7 @@ func run() error {
 type storage struct {
 	procurements domainproc.Repository
 	audit        audit.Repository
+	idempotency  idempotency.Repository
 	uow          app.UnitOfWork
 	ping         func(context.Context) error
 	close        func() error
@@ -118,6 +135,7 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 		return storage{
 			procurements: repo,
 			audit:        memory.NewAuditRepository(),
+			idempotency:  memory.NewIdempotencyRepository(),
 			ping:         repo.Ping,
 		}, nil
 	}
@@ -148,6 +166,7 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 	return storage{
 		procurements: postgres.NewProcurementRepository(db),
 		audit:        postgres.NewAuditRepository(db),
+		idempotency:  postgres.NewIdempotencyRepository(db),
 		uow:          postgres.NewUnitOfWork(db),
 		ping:         db.PingContext,
 		close:        db.Close,

@@ -5,6 +5,11 @@ info:
   description: |
     Procurement workflow API. Success responses use `{"data": ..., "meta": ...}`.
     Errors use RFC 9457 `application/problem+json`.
+
+    Write endpoints accept an `Idempotency-Key` header: retrying with the same
+    key and body replays the original response instead of creating a duplicate.
+    API routes are rate limited per caller and return `429` with `Retry-After`
+    when the bucket is exhausted.
 servers:
   - url: http://localhost:8080
 security:
@@ -82,6 +87,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           description: A page of procurements
           content:
@@ -102,6 +109,18 @@ paths:
       tags: [Procurements]
       summary: Create a draft procurement
       operationId: createProcurement
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Client-generated key (1-255 printable ASCII characters). Repeating
+            the request with the same key and body replays the stored response;
+            reusing the key with a different body returns `422`.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
       requestBody:
         required: true
         content:
@@ -113,6 +132,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "201":
           description: Created
           headers:
@@ -129,12 +150,23 @@ paths:
                     $ref: "#/components/schemas/Procurement"
         "400":
           $ref: "#/components/responses/Problem"
+        "409":
+          description: A request with this Idempotency-Key is still in progress
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         "413":
           $ref: "#/components/responses/Problem"
         "415":
           $ref: "#/components/responses/Problem"
         "422":
           $ref: "#/components/responses/Problem"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /api/v1/procurements/{id}:
     get:
       tags: [Procurements]
@@ -147,6 +179,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           description: Procurement
           content:
@@ -171,6 +205,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           $ref: "#/components/responses/Procurement"
         "404":
@@ -189,6 +225,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           $ref: "#/components/responses/Procurement"
         "404":
@@ -220,6 +258,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           $ref: "#/components/responses/Procurement"
         "400":
@@ -242,6 +282,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           $ref: "#/components/responses/Procurement"
         "404":
@@ -256,25 +298,51 @@ paths:
       operationId: listProcurementAudit
       parameters:
         - $ref: "#/components/parameters/ProcurementID"
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: page_size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
       responses:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "200":
           description: Audit events
           content:
             application/json:
               schema:
                 type: object
-                required: [data]
+                required: [data, meta]
                 properties:
                   data:
                     type: array
                     items:
                       $ref: "#/components/schemas/AuditEvent"
+                  meta:
+                    $ref: "#/components/schemas/PageMeta"
         "404":
           $ref: "#/components/responses/Problem"
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition format. This endpoint is public, like the
+        health probes; restrict it at the network layer in production.
+      operationId: getMetrics
+      security: []
+      responses:
+        "200":
+          description: Metrics in Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
 components:
   securitySchemes:
     bearerAuth:
@@ -302,6 +370,16 @@ components:
             $ref: "#/components/schemas/Problem"
     Forbidden:
       description: The caller is not allowed to perform this action
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    TooManyRequests:
+      description: The caller exceeded the rate limit
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds to wait before retrying
       content:
         application/problem+json:
           schema:

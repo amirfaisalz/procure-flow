@@ -79,6 +79,24 @@ row does not exist).
 
 The table is append-only: a trigger rejects `UPDATE` and `DELETE`.
 
+### `idempotency_keys`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `actor_id` | `text` | authenticated subject |
+| `key` | `text` | client `Idempotency-Key` |
+| `request_hash` | `text` | SHA-256 of method, URI, and body |
+| `status` | `integer` | 0 while in progress, otherwise the HTTP status |
+| `content_type` | `text` | stored response content type |
+| `location` | `text` | stored `Location` header |
+| `body` | `bytea` | stored response body |
+| `created_at` | `timestamptz` | claim time |
+| `expires_at` | `timestamptz` | replay deadline |
+
+The primary key is `(actor_id, key)`. Claims are inserted with
+`ON CONFLICT DO NOTHING`, so concurrent retries cannot both execute. Expired
+rows can be reclaimed atomically; the `expires_at` index supports cleanup.
+
 ### `schema_migrations`
 
 Managed by the runner: `version text primary key`, `applied_at timestamptz`.

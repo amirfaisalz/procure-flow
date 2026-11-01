@@ -21,7 +21,8 @@ cmd/api
   └─ internal/domain/audit             (append-only audit port)
        └─ internal/infrastructure/memory   (local adapters)
        └─ internal/infrastructure/postgres (production adapters)
-  └─ internal/platform                 (IDs, request IDs, logging, auth)
+  └─ internal/platform                 (IDs, request IDs, logging, auth,
+                                        rate limiting, metrics, tracing)
   └─ internal/config                   (environment configuration)
 ```
 
@@ -122,7 +123,39 @@ the same unit of work as the aggregate write.
 
 On PostgreSQL, `audit_events` has a trigger that rejects `UPDATE` and `DELETE`,
 so history cannot be rewritten even by a compromised application. Events are
-read newest first through `GET /api/v1/procurements/{id}/audit`.
+read newest first through `GET /api/v1/procurements/{id}/audit`, paginated with
+`page` and `page_size` (default 20, maximum 100).
+
+## Idempotency
+
+`internal/domain/idempotency` defines a claim/replay port implemented by the
+memory and PostgreSQL adapters. `POST /api/v1/procurements` is wrapped by
+middleware that:
+
+1. hashes the method, URI, and body, scoped to the authenticated actor;
+2. atomically claims `(actor_id, idempotency_key)` with `ON CONFLICT DO
+   NOTHING`;
+3. stores the status, content type, `Location`, and body on success;
+4. replays the stored response for an identical retry, rejects a different body
+   with `422 IDEMPOTENCY_KEY_REUSED`, and reports `409
+   IDEMPOTENCY_IN_PROGRESS` while the first request runs;
+5. releases the claim when the handler returns a 5xx or panics.
+
+Claims expire after `IDEMPOTENCY_TTL`; an expired claim can be taken over
+atomically. Keys are never shared across actors.
+
+## Rate limiting and observability
+
+`internal/platform/ratelimit` is a token bucket keyed by authenticated subject
+or remote IP. `internal/transport/httpapi/middleware.RateLimit` runs after
+authentication so the subject is available, emits `X-RateLimit-*` headers, and
+returns `429 RATE_LIMITED` with `Retry-After`.
+
+`internal/platform/metrics` is a dependency-free registry that renders
+Prometheus text format at `GET /metrics`. The route label is the `ServeMux`
+pattern, keeping cardinality bounded. `internal/platform/tracing` parses and
+emits W3C `traceparent`, stores trace/span IDs in context, and feeds them into
+access logs; span export to an OpenTelemetry backend is not yet implemented.
 
 ### Migrations
 
@@ -167,15 +200,20 @@ unmatched requests and rewrites them as problem documents, preserving the
 ### Middleware order
 
 ```
-RequestID → AccessLog → Recover → SecurityHeaders → CORS → Timeout → handler
+Timeout → RequestID → Tracing → AccessLog → Metrics → Recover
+        → SecurityHeaders → CORS → handler
 ```
 
+- `Timeout` is outermost so every layer and the `ServeMux` share one request
+  value (metrics read `r.Pattern` from it).
 - `RequestID` validates or generates a correlation ID and stores it in context.
-- `AccessLog` emits one structured record per request.
+- `Tracing` adopts or creates W3C trace context and emits `traceparent` and
+  `X-Trace-ID`.
+- `AccessLog` emits one structured record per request, including trace IDs.
+- `Metrics` records counters and duration histograms by route pattern.
 - `Recover` converts panics into 500 problems and re-panics `http.ErrAbortHandler`.
 - `SecurityHeaders` sets conservative JSON-API headers; HSTS only over TLS.
 - `CORS` allows exact origins and answers preflight requests.
-- `Timeout` attaches a per-request deadline; handlers and repositories honor it.
 
 ### Errors
 
@@ -188,6 +226,9 @@ RequestID → AccessLog → Recover → SecurityHeaders → CORS → Timeout →
 | `domain.ErrForbidden` | 403 | `FORBIDDEN` |
 | `auth.ErrUnauthenticated` (middleware) | 401 | `UNAUTHENTICATED` |
 | `domain.ErrConflict` | 409 | `CONFLICT` |
+| idempotency in progress | 409 | `IDEMPOTENCY_IN_PROGRESS` |
+| idempotency key reused | 422 | `IDEMPOTENCY_KEY_REUSED` |
+| rate limit exceeded | 429 | `RATE_LIMITED` |
 | `domain.ErrInvalidTransition` | 409 | `INVALID_TRANSITION` |
 | `context.DeadlineExceeded` | 504 | `TIMEOUT` |
 | `context.Canceled` | 408 | `REQUEST_CANCELED` |
@@ -200,7 +241,8 @@ Unknown errors are logged with the request ID and never expose internal detail.
 1. Load and validate configuration (production requires `DATABASE_URL` and
    authentication).
 2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapters.
-3. Build the credential chain, logger, service, health checks, router.
+3. Build the credential chain, rate limiter, metrics registry, logger, service,
+   health checks, and router.
 4. `net.Listen` first so binding errors surface before serving.
 5. `Serve` in a goroutine.
 6. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
@@ -213,6 +255,11 @@ Unknown errors are logged with the request ID and never expose internal detail.
   policy tests for every role and department/ownership combination.
 - Authentication: API-key and JWT acceptance/rejection tables, including
   expired, wrong-audience, bad-signature, malformed, and `alg: none` tokens.
+- Idempotency: repository claim/replay contract against memory and PostgreSQL,
+  plus middleware tests for replay, key reuse, in-progress, 5xx release, and
+  actor isolation.
+- Rate limiting and metrics: token-bucket refill/pruning, 429 mapping, and
+  Prometheus rendering with bounded route labels.
 - Infrastructure: a shared repository contract run against memory and
   PostgreSQL, covering concurrency, uniqueness, filtering, pagination, and
   context cancellation. PostgreSQL tests are gated by `TEST_DATABASE_URL`.

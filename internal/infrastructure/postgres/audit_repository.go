@@ -9,11 +9,6 @@ import (
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 )
 
-const (
-	defaultAuditLimit = 200
-	maxAuditLimit     = 500
-)
-
 const auditColumns = `id, entity_type, entity_id, action, actor_id, actor_name,
 	actor_role, from_status, to_status, metadata, occurred_at`
 
@@ -52,28 +47,43 @@ INSERT INTO audit_events (
 	return nil
 }
 
-// ListByEntity returns the newest events for one entity, up to limit.
-func (r *AuditRepository) ListByEntity(ctx context.Context, entityType, entityID string, limit int) ([]audit.Event, error) {
-	if limit <= 0 {
-		limit = defaultAuditLimit
+// List returns a page of events for one entity, newest first.
+func (r *AuditRepository) List(ctx context.Context, filter audit.ListFilter) (audit.ListResult, error) {
+	page := filter.Page
+	if page <= 0 {
+		page = 1
 	}
-	if limit > maxAuditLimit {
-		limit = maxAuditLimit
+	pageSize := filter.PageSize
+	if pageSize <= 0 {
+		pageSize = audit.DefaultPageSize
+	}
+	if pageSize > audit.MaxPageSize {
+		pageSize = audit.MaxPageSize
 	}
 
-	rows, err := querierFrom(ctx, r.db).QueryContext(ctx,
+	q := querierFrom(ctx, r.db)
+
+	var total int
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_events WHERE entity_type = $1 AND entity_id = $2`,
+		filter.EntityType, filter.EntityID,
+	).Scan(&total); err != nil {
+		return audit.ListResult{}, fmt.Errorf("postgres: count audit events: %w", err)
+	}
+
+	rows, err := q.QueryContext(ctx,
 		`SELECT `+auditColumns+` FROM audit_events
 		 WHERE entity_type = $1 AND entity_id = $2
 		 ORDER BY occurred_at DESC, id DESC
-		 LIMIT $3`,
-		entityType, entityID, limit,
+		 LIMIT $3 OFFSET $4`,
+		filter.EntityType, filter.EntityID, pageSize, (page-1)*pageSize,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list audit events: %w", err)
+		return audit.ListResult{}, fmt.Errorf("postgres: list audit events: %w", err)
 	}
 	defer rows.Close()
 
-	events := make([]audit.Event, 0, limit)
+	events := make([]audit.Event, 0, pageSize)
 	for rows.Next() {
 		var (
 			event    audit.Event
@@ -83,18 +93,24 @@ func (r *AuditRepository) ListByEntity(ctx context.Context, entityType, entityID
 			&event.ID, &event.EntityType, &event.EntityID, &event.Action, &event.ActorID, &event.ActorName,
 			&event.ActorRole, &event.FromStatus, &event.ToStatus, &metadata, &event.OccurredAt,
 		); err != nil {
-			return nil, fmt.Errorf("postgres: scan audit event: %w", err)
+			return audit.ListResult{}, fmt.Errorf("postgres: scan audit event: %w", err)
 		}
 		if len(metadata) > 0 {
 			if err := json.Unmarshal(metadata, &event.Metadata); err != nil {
-				return nil, fmt.Errorf("postgres: decode audit metadata: %w", err)
+				return audit.ListResult{}, fmt.Errorf("postgres: decode audit metadata: %w", err)
 			}
 		}
 		event.OccurredAt = event.OccurredAt.UTC()
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: iterate audit events: %w", err)
+		return audit.ListResult{}, fmt.Errorf("postgres: iterate audit events: %w", err)
 	}
-	return events, nil
+
+	return audit.ListResult{
+		Events:   events,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
 }

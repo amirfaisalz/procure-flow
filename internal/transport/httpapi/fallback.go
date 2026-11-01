@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 
+	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/middleware"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/response"
 )
 
@@ -19,6 +20,9 @@ func (f *fallback) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if pattern != "" {
 		// Route through the mux (not handler) so PathValue is populated.
 		f.mux.ServeHTTP(w, r)
+		// A nested mux (for example the authenticated /api/v1 sub-router)
+		// matched a more specific pattern; report it to the metrics recorder.
+		middleware.SetRoute(r.Context(), r.Pattern)
 		return
 	}
 

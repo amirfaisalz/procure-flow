@@ -29,13 +29,34 @@ func (e Env) IsProduction() bool {
 
 // Config is the fully validated application configuration.
 type Config struct {
-	Env      Env
-	LogLevel slog.Level
-	HTTP     HTTP
-	CORS     CORS
-	Docs     Docs
-	Database Database
-	Auth     Auth
+	Env         Env
+	LogLevel    slog.Level
+	HTTP        HTTP
+	CORS        CORS
+	Docs        Docs
+	Database    Database
+	Auth        Auth
+	Idempotency Idempotency
+	RateLimit   RateLimit
+	Metrics     Metrics
+}
+
+// Idempotency controls replay protection for write endpoints.
+type Idempotency struct {
+	Enabled bool
+	TTL     time.Duration
+}
+
+// RateLimit controls the per-caller token bucket.
+type RateLimit struct {
+	Enabled           bool
+	RequestsPerSecond float64
+	Burst             int
+}
+
+// Metrics controls the Prometheus exposition endpoint.
+type Metrics struct {
+	Enabled bool
 }
 
 // Auth controls request authentication and role-based authorization.
@@ -136,14 +157,32 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
+	idempotencyConfig, err := loadIdempotency(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+
+	rateLimitConfig, err := loadRateLimit(getenv, env)
+	if err != nil {
+		return Config{}, err
+	}
+
+	metricsConfig, err := loadMetrics(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
-		Env:      env,
-		LogLevel: level,
-		HTTP:     httpConfig,
-		CORS:     corsConfig,
-		Docs:     docsConfig,
-		Database: databaseConfig,
-		Auth:     authConfig,
+		Env:         env,
+		LogLevel:    level,
+		HTTP:        httpConfig,
+		CORS:        corsConfig,
+		Docs:        docsConfig,
+		Database:    databaseConfig,
+		Auth:        authConfig,
+		Idempotency: idempotencyConfig,
+		RateLimit:   rateLimitConfig,
+		Metrics:     metricsConfig,
 	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
@@ -173,6 +212,46 @@ func (c Config) validate() error {
 		}
 	}
 	return nil
+}
+
+func loadIdempotency(getenv func(string) string) (Idempotency, error) {
+	enabled, err := boolEnv(getenv, "IDEMPOTENCY_ENABLED", true)
+	if err != nil {
+		return Idempotency{}, err
+	}
+	ttl, err := durationEnv(getenv, "IDEMPOTENCY_TTL", 24*time.Hour)
+	if err != nil {
+		return Idempotency{}, err
+	}
+	return Idempotency{Enabled: enabled, TTL: ttl}, nil
+}
+
+func loadRateLimit(getenv func(string) string, env Env) (RateLimit, error) {
+	enabled, err := boolEnv(getenv, "RATE_LIMIT_ENABLED", env != EnvDevelopment)
+	if err != nil {
+		return RateLimit{}, err
+	}
+	requestsPerSecond, err := floatEnv(getenv, "RATE_LIMIT_RPS", 20)
+	if err != nil {
+		return RateLimit{}, err
+	}
+	burst, err := intEnv(getenv, "RATE_LIMIT_BURST", 40)
+	if err != nil {
+		return RateLimit{}, err
+	}
+	return RateLimit{
+		Enabled:           enabled,
+		RequestsPerSecond: requestsPerSecond,
+		Burst:             burst,
+	}, nil
+}
+
+func loadMetrics(getenv func(string) string) (Metrics, error) {
+	enabled, err := boolEnv(getenv, "METRICS_ENABLED", true)
+	if err != nil {
+		return Metrics{}, err
+	}
+	return Metrics{Enabled: enabled}, nil
 }
 
 func parseEnv(raw string) (Env, error) {
@@ -466,6 +545,22 @@ func durationEnv(getenv func(string) string, key string, fallback time.Duration)
 	value, err := time.ParseDuration(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s: invalid duration %q: %w", key, raw, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s: must be greater than zero", key)
+	}
+	return value, nil
+}
+
+func floatEnv(getenv func(string) string, key string, fallback float64) (float64, error) {
+	raw := strings.TrimSpace(getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid number %q: %w", key, raw, err)
 	}
 	if value <= 0 {
 		return 0, fmt.Errorf("%s: must be greater than zero", key)

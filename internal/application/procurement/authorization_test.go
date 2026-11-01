@@ -44,18 +44,38 @@ func (f *fakeAuditRepo) Append(_ context.Context, event audit.Event) error {
 	return nil
 }
 
-func (f *fakeAuditRepo) ListByEntity(_ context.Context, entityType, entityID string, limit int) ([]audit.Event, error) {
+func (f *fakeAuditRepo) List(_ context.Context, filter audit.ListFilter) (audit.ListResult, error) {
 	out := make([]audit.Event, 0, len(f.events))
 	for _, event := range f.events {
-		if event.EntityType == entityType && event.EntityID == entityID {
+		if event.EntityType == filter.EntityType && event.EntityID == filter.EntityID {
 			out = append(out, event)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID > out[j].ID })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+
+	page := filter.Page
+	if page <= 0 {
+		page = 1
 	}
-	return out, nil
+	pageSize := filter.PageSize
+	if pageSize <= 0 {
+		pageSize = audit.DefaultPageSize
+	}
+	total := len(out)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return audit.ListResult{
+		Events:   append([]audit.Event(nil), out[start:end]...),
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
 }
 
 type fakeUnitOfWork struct {
@@ -83,7 +103,7 @@ func TestServiceFailsClosedWithoutActor(t *testing.T) {
 		{"Approve", func() error { _, err := svc.Approve(ctx, "prc_1"); return err }},
 		{"Reject", func() error { _, err := svc.Reject(ctx, "prc_1", "no budget"); return err }},
 		{"Cancel", func() error { _, err := svc.Cancel(ctx, "prc_1"); return err }},
-		{"Audit", func() error { _, err := svc.Audit(ctx, "prc_1"); return err }},
+		{"Audit", func() error { _, err := svc.Audit(ctx, "prc_1", audit.ListFilter{}); return err }},
 	}
 
 	for _, call := range calls {
@@ -321,25 +341,28 @@ func TestServiceAuditRecordsLifecycle(t *testing.T) {
 		t.Fatalf("Approve() error = %v", err)
 	}
 
-	events, err := svc.Audit(owner, created.ID)
+	result, err := svc.Audit(owner, created.ID, audit.ListFilter{})
 	if err != nil {
 		t.Fatalf("Audit() error = %v", err)
 	}
-	if len(events) != 3 {
-		t.Fatalf("len(events) = %d, want 3", len(events))
+	if len(result.Events) != 3 {
+		t.Fatalf("len(events) = %d, want 3", len(result.Events))
+	}
+	if result.Total != 3 {
+		t.Errorf("Total = %d, want 3", result.Total)
 	}
 
 	wantActions := []string{app.ActionApproved, app.ActionSubmitted, app.ActionCreated}
 	for i, want := range wantActions {
-		if events[i].Action != want {
-			t.Errorf("events[%d].Action = %q, want %q", i, events[i].Action, want)
+		if result.Events[i].Action != want {
+			t.Errorf("events[%d].Action = %q, want %q", i, result.Events[i].Action, want)
 		}
 	}
-	if events[0].ActorID != "user_admin" {
-		t.Errorf("approval actor = %q, want user_admin", events[0].ActorID)
+	if result.Events[0].ActorID != "user_admin" {
+		t.Errorf("approval actor = %q, want user_admin", result.Events[0].ActorID)
 	}
-	if events[2].FromStatus != "" || events[2].ToStatus != string(domainproc.StatusDraft) {
-		t.Errorf("created event statuses = %q -> %q", events[2].FromStatus, events[2].ToStatus)
+	if result.Events[2].FromStatus != "" || result.Events[2].ToStatus != string(domainproc.StatusDraft) {
+		t.Errorf("created event statuses = %q -> %q", result.Events[2].FromStatus, result.Events[2].ToStatus)
 	}
 	if uow.calls == 0 {
 		t.Error("unit of work was never used")
@@ -362,11 +385,55 @@ func TestServiceAuditAppendFailurePropagates(t *testing.T) {
 	}
 }
 
+func TestServiceAuditPagination(t *testing.T) {
+	repo := &fakeRepo{has: true, item: domainproc.Procurement{ID: "prc_1"}}
+	auditRepo := &fakeAuditRepo{}
+	for i := 0; i < 5; i++ {
+		auditRepo.events = append(auditRepo.events, audit.Event{
+			EntityType: audit.EntityProcurement,
+			EntityID:   "prc_1",
+			Action:     "procurement.action",
+		})
+	}
+	svc := app.NewService(repo, fakeIDs{}, nil, app.WithAudit(auditRepo, &fakeUnitOfWork{}))
+
+	result, err := svc.Audit(adminCtx(), "prc_1", audit.ListFilter{Page: 2, PageSize: 2})
+	if err != nil {
+		t.Fatalf("Audit() error = %v", err)
+	}
+	if result.Total != 5 || result.Page != 2 || result.PageSize != 2 {
+		t.Errorf("result meta = %+v, want total=5 page=2 size=2", result)
+	}
+	if len(result.Events) != 2 {
+		t.Errorf("len(events) = %d, want 2", len(result.Events))
+	}
+}
+
+func TestServiceAuditRejectsInvalidPagination(t *testing.T) {
+	repo := &fakeRepo{has: true, item: domainproc.Procurement{ID: "prc_1"}}
+	svc := app.NewService(repo, fakeIDs{}, nil, app.WithAudit(&fakeAuditRepo{}, &fakeUnitOfWork{}))
+
+	tests := []struct {
+		name   string
+		filter audit.ListFilter
+		field  string
+	}{
+		{name: "negative page", filter: audit.ListFilter{Page: -1}, field: "page"},
+		{name: "page size too large", filter: audit.ListFilter{PageSize: audit.MaxPageSize + 1}, field: "page_size"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := svc.Audit(adminCtx(), "prc_1", tt.filter)
+			requireFieldError(t, err, tt.field)
+		})
+	}
+}
+
 func TestServiceAuditNotFound(t *testing.T) {
 	repo := &fakeRepo{}
 	svc := app.NewService(repo, fakeIDs{}, nil, app.WithAudit(&fakeAuditRepo{}, &fakeUnitOfWork{}))
 
-	_, err := svc.Audit(adminCtx(), "prc_missing")
+	_, err := svc.Audit(adminCtx(), "prc_missing", audit.ListFilter{})
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("Audit() error = %v, want ErrNotFound", err)
 	}

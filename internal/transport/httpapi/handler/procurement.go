@@ -8,6 +8,7 @@ import (
 	"time"
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
+	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 	"github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/response"
 )
@@ -139,14 +140,20 @@ func (h *Procurement) Get(w http.ResponseWriter, r *http.Request) {
 
 // Audit handles GET /api/v1/procurements/{id}/audit.
 func (h *Procurement) Audit(w http.ResponseWriter, r *http.Request) {
-	events, err := h.service.Audit(r.Context(), r.PathValue("id"))
+	filter, err := parseAuditFilter(r)
 	if err != nil {
 		WriteError(w, r, h.logger, err)
 		return
 	}
 
-	items := make([]auditEventResponse, len(events))
-	for i, event := range events {
+	result, err := h.service.Audit(r.Context(), r.PathValue("id"), filter)
+	if err != nil {
+		WriteError(w, r, h.logger, err)
+		return
+	}
+
+	items := make([]auditEventResponse, len(result.Events))
+	for i, event := range result.Events {
 		items[i] = auditEventResponse{
 			ID:         event.ID,
 			Action:     event.Action,
@@ -159,7 +166,38 @@ func (h *Procurement) Audit(w http.ResponseWriter, r *http.Request) {
 			OccurredAt: event.OccurredAt,
 		}
 	}
-	response.JSON(w, http.StatusOK, items)
+	response.JSONWithMeta(w, http.StatusOK, items, pageMeta{
+		Page:       result.Page,
+		PageSize:   result.PageSize,
+		Total:      result.Total,
+		TotalPages: result.TotalPages(),
+	})
+}
+
+func parseAuditFilter(r *http.Request) (audit.ListFilter, error) {
+	query := r.URL.Query()
+	filter := audit.ListFilter{}
+
+	if raw := strings.TrimSpace(query.Get("page")); raw != "" {
+		page, err := strconv.Atoi(raw)
+		if err != nil || page < 1 {
+			return audit.ListFilter{}, &QueryError{Field: "page", Message: "must be a positive integer"}
+		}
+		filter.Page = page
+	}
+
+	if raw := strings.TrimSpace(query.Get("page_size")); raw != "" {
+		pageSize, err := strconv.Atoi(raw)
+		if err != nil || pageSize < 1 || pageSize > audit.MaxPageSize {
+			return audit.ListFilter{}, &QueryError{
+				Field:   "page_size",
+				Message: "must be between 1 and " + strconv.Itoa(audit.MaxPageSize),
+			}
+		}
+		filter.PageSize = pageSize
+	}
+
+	return filter, nil
 }
 
 // Submit handles POST /api/v1/procurements/{id}/submit.

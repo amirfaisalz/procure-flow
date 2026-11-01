@@ -26,12 +26,14 @@ type fakeRepo struct {
 	item domainproc.Procurement
 	has  bool
 
-	createErr error
-	getErr    error
-	updateErr error
-	listErr   error
+	createErr       error
+	createConflicts int
+	getErr          error
+	updateErr       error
+	listErr         error
 
 	createCalled bool
+	createCalls  int
 	getCalled    bool
 	updateCalled bool
 	listCalled   bool
@@ -43,8 +45,13 @@ type fakeRepo struct {
 
 func (f *fakeRepo) Create(_ context.Context, p domainproc.Procurement) error {
 	f.createCalled = true
+	f.createCalls++
 	if f.createErr != nil {
 		return f.createErr
+	}
+	if f.createConflicts > 0 {
+		f.createConflicts--
+		return domain.ErrConflict
 	}
 	f.item = p
 	f.has = true
@@ -368,5 +375,76 @@ func TestServiceListRepositoryError(t *testing.T) {
 	_, err := svc.List(adminCtx(), domainproc.ListFilter{})
 	if err == nil || err.Error() != "boom" {
 		t.Fatalf("List() error = %v, want boom", err)
+	}
+}
+
+type sequenceIDs struct {
+	ids     []string
+	numbers []string
+	index   int
+}
+
+func (s *sequenceIDs) NewID() string {
+	id := s.ids[s.index%len(s.ids)]
+	return id
+}
+
+func (s *sequenceIDs) NewNumber(time.Time) string {
+	number := s.numbers[s.index%len(s.numbers)]
+	s.index++
+	return number
+}
+
+func TestServiceCreateRetriesAfterNumberCollision(t *testing.T) {
+	repo := &fakeRepo{createConflicts: 1}
+	ids := &sequenceIDs{
+		ids:     []string{"prc_1", "prc_2"},
+		numbers: []string{"PR-202610-0000000000000001", "PR-202610-0000000000000002"},
+	}
+	svc := app.NewService(repo, ids, func() time.Time { return fixedNow })
+
+	got, err := svc.Create(adminCtx(), validInput())
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if got.ID != "prc_2" {
+		t.Errorf("ID = %q, want the retried identifier prc_2", got.ID)
+	}
+	if got.Number != "PR-202610-0000000000000002" {
+		t.Errorf("Number = %q, want the retried number", got.Number)
+	}
+	if repo.createCalls != 2 {
+		t.Errorf("Create calls = %d, want 2", repo.createCalls)
+	}
+}
+
+func TestServiceCreateGivesUpAfterRepeatedCollisions(t *testing.T) {
+	repo := &fakeRepo{createConflicts: 10}
+	ids := &sequenceIDs{
+		ids:     []string{"prc_1"},
+		numbers: []string{"PR-202610-0000000000000001"},
+	}
+	svc := app.NewService(repo, ids, func() time.Time { return fixedNow })
+
+	_, err := svc.Create(adminCtx(), validInput())
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("Create() error = %v, want ErrConflict", err)
+	}
+	if repo.createCalls != 3 {
+		t.Errorf("Create calls = %d, want 3", repo.createCalls)
+	}
+}
+
+func TestServiceCreateDoesNotRetryOtherErrors(t *testing.T) {
+	boom := errors.New("storage down")
+	repo := &fakeRepo{createErr: boom}
+	svc := newService(repo)
+
+	_, err := svc.Create(adminCtx(), validInput())
+	if !errors.Is(err, boom) {
+		t.Fatalf("Create() error = %v, want the storage error", err)
+	}
+	if repo.createCalls != 1 {
+		t.Errorf("Create calls = %d, want 1", repo.createCalls)
 	}
 }

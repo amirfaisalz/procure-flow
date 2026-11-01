@@ -6,7 +6,10 @@ import (
 
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
+	"github.com/amirfaisalz/procure-flow/internal/domain/idempotency"
 	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
+	"github.com/amirfaisalz/procure-flow/internal/platform/metrics"
+	"github.com/amirfaisalz/procure-flow/internal/platform/ratelimit"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/middleware"
 )
@@ -18,6 +21,9 @@ type Dependencies struct {
 	Procurement   *app.Service
 	Health        *handler.Health
 	Authenticator auth.Authenticator
+	Idempotency   idempotency.Repository
+	RateLimiter   *ratelimit.Limiter
+	Metrics       *metrics.Registry
 }
 
 // localActor is injected when authentication is disabled. It is an admin so
@@ -28,13 +34,13 @@ var localActor = app.Actor{
 	Roles:   []string{app.RoleAdmin},
 }
 
-// NewRouter wires routes and middleware. Middleware is ordered so a request ID
-// exists before logging, panics are recovered before headers are finalized, and
-// the timeout applies to the innermost handler.
+// NewRouter wires routes and middleware. Middleware is ordered so the request
+// deadline covers the whole chain, a request ID and trace context exist before
+// logging, and panics are recovered before metrics record the final status.
 //
-// Health probes and API documentation stay public; every /api/v1 route is
-// authenticated. When authentication is disabled the router injects a local
-// admin actor, mirroring the behaviour of the in-memory repository.
+// Health probes, API documentation, and metrics stay public; every /api/v1
+// route is authenticated. When authentication is disabled the router injects a
+// local admin actor, mirroring the behaviour of the in-memory repository.
 func NewRouter(deps Dependencies) http.Handler {
 	logger := deps.Logger
 	if logger == nil {
@@ -44,7 +50,18 @@ func NewRouter(deps Dependencies) http.Handler {
 	procurementHandler := handler.NewProcurement(deps.Procurement, logger)
 
 	apiMux := http.NewServeMux()
-	apiMux.HandleFunc("POST /api/v1/procurements", procurementHandler.Create)
+
+	createProcurement := http.Handler(http.HandlerFunc(procurementHandler.Create))
+	if deps.Config.Idempotency.Enabled && deps.Idempotency != nil {
+		createProcurement = middleware.Idempotency(
+			deps.Idempotency,
+			deps.Config.Idempotency.TTL,
+			nil,
+			logger,
+		)(createProcurement)
+	}
+	apiMux.Handle("POST /api/v1/procurements", createProcurement)
+
 	apiMux.HandleFunc("GET /api/v1/procurements", procurementHandler.List)
 	apiMux.HandleFunc("GET /api/v1/procurements/{id}", procurementHandler.Get)
 	apiMux.HandleFunc("GET /api/v1/procurements/{id}/audit", procurementHandler.Audit)
@@ -54,22 +71,32 @@ func NewRouter(deps Dependencies) http.Handler {
 	apiMux.HandleFunc("POST /api/v1/procurements/{id}/cancel", procurementHandler.Cancel)
 
 	var apiHandler http.Handler = &fallback{mux: apiMux}
+
+	apiMiddlewares := make([]middleware.Middleware, 0, 2)
 	if deps.Config.Auth.Enabled {
 		authenticator := deps.Authenticator
 		if authenticator == nil {
 			// Fail closed: a missing authenticator rejects every request.
 			authenticator = auth.Chain{}
 		}
-		apiHandler = middleware.Chain(apiHandler, middleware.Authentication(authenticator, logger))
+		apiMiddlewares = append(apiMiddlewares, middleware.Authentication(authenticator, logger))
 	} else {
 		logger.Warn("authentication is disabled; injecting a local admin actor")
-		apiHandler = middleware.Chain(apiHandler, middleware.InjectActor(localActor))
+		apiMiddlewares = append(apiMiddlewares, middleware.InjectActor(localActor))
 	}
+	if deps.Config.RateLimit.Enabled && deps.RateLimiter != nil {
+		apiMiddlewares = append(apiMiddlewares, middleware.RateLimit(deps.RateLimiter, logger))
+	}
+	apiHandler = middleware.Chain(apiHandler, apiMiddlewares...)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", deps.Health.Live)
 	mux.HandleFunc("GET /readyz", deps.Health.Ready)
 	mux.Handle("/api/v1/", apiHandler)
+
+	if deps.Config.Metrics.Enabled {
+		mux.Handle("GET /metrics", handler.NewMetrics(deps.Metrics))
+	}
 
 	if deps.Config.Docs.Enabled {
 		docs := newDocsHandler()
@@ -79,16 +106,21 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	var router http.Handler = &fallback{mux: mux}
 
-	middlewares := []middleware.Middleware{
+	middlewares := make([]middleware.Middleware, 0, 8)
+	if deps.Config.HTTP.RequestTimeout > 0 {
+		// Timeout is outermost so every middleware and the ServeMux observe the
+		// same request value, which is what lets metrics read r.Pattern.
+		middlewares = append(middlewares, middleware.Timeout(deps.Config.HTTP.RequestTimeout))
+	}
+	middlewares = append(middlewares,
 		middleware.RequestID(),
+		middleware.Tracing(),
 		middleware.AccessLog(logger),
+		middleware.Metrics(deps.Metrics),
 		middleware.Recover(logger),
 		middleware.SecurityHeaders(),
 		middleware.CORS(deps.Config.CORS.AllowedOrigins),
-	}
-	if deps.Config.HTTP.RequestTimeout > 0 {
-		middlewares = append(middlewares, middleware.Timeout(deps.Config.HTTP.RequestTimeout))
-	}
+	)
 
 	return middleware.Chain(router, middlewares...)
 }

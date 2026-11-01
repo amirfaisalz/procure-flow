@@ -2,6 +2,7 @@ package procurement
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -19,7 +20,10 @@ const (
 	ActionCancelled = "procurement.cancelled"
 )
 
-const auditListLimit = 200
+// createAttempts bounds retries when a generated request number or identifier
+// collides with an existing row. Collisions are already negligible, so a small
+// budget is enough to absorb a rare clash without surfacing a 409 to clients.
+const createAttempts = 3
 
 // IDGenerator supplies identifiers for new aggregates.
 type IDGenerator interface {
@@ -87,40 +91,46 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Pro
 		return domainproc.Procurement{}, domain.ErrForbidden
 	}
 
-	now := s.now().UTC()
 	requester := strings.TrimSpace(input.Requester)
 	if requester == "" {
 		requester = actor.DisplayName()
 	}
 
-	p, err := domainproc.New(
-		s.ids.NewID(),
-		s.ids.NewNumber(now),
-		domainproc.CreateParams{
-			Title:       input.Title,
-			Description: input.Description,
-			Department:  input.Department,
-			Requester:   requester,
-			RequesterID: actor.Subject,
-			Amount:      input.Amount,
-			Currency:    input.Currency,
-		},
-		now,
-	)
-	if err != nil {
-		return domainproc.Procurement{}, err
-	}
-
-	err = s.withinTx(ctx, func(ctx context.Context) error {
-		if err := s.repo.Create(ctx, p); err != nil {
-			return err
+	var p domainproc.Procurement
+	for attempt := 0; attempt < createAttempts; attempt++ {
+		now := s.now().UTC()
+		p, err = domainproc.New(
+			s.ids.NewID(),
+			s.ids.NewNumber(now),
+			domainproc.CreateParams{
+				Title:       input.Title,
+				Description: input.Description,
+				Department:  input.Department,
+				Requester:   requester,
+				RequesterID: actor.Subject,
+				Amount:      input.Amount,
+				Currency:    input.Currency,
+			},
+			now,
+		)
+		if err != nil {
+			return domainproc.Procurement{}, err
 		}
-		return s.record(ctx, actor, p, ActionCreated, "")
-	})
-	if err != nil {
-		return domainproc.Procurement{}, err
+
+		err = s.withinTx(ctx, func(ctx context.Context) error {
+			if err := s.repo.Create(ctx, p); err != nil {
+				return err
+			}
+			return s.record(ctx, actor, p, ActionCreated, "")
+		})
+		if err == nil {
+			return p, nil
+		}
+		if !errors.Is(err, domain.ErrConflict) {
+			return domainproc.Procurement{}, err
+		}
 	}
-	return p, nil
+	return domainproc.Procurement{}, err
 }
 
 // Get returns one procurement by ID.
@@ -203,15 +213,39 @@ func (s *Service) Cancel(ctx context.Context, id string) (domainproc.Procurement
 	})
 }
 
-// Audit returns the audit trail for one procurement, newest first.
-func (s *Service) Audit(ctx context.Context, id string) ([]audit.Event, error) {
+// Audit returns a page of the audit trail for one procurement, newest first.
+func (s *Service) Audit(ctx context.Context, id string, filter audit.ListFilter) (audit.ListResult, error) {
 	if _, err := s.Get(ctx, id); err != nil {
-		return nil, err
+		return audit.ListResult{}, err
 	}
+
+	if filter.Page == 0 {
+		filter.Page = 1
+	}
+	if filter.Page < 0 {
+		return audit.ListResult{}, &domain.ValidationError{
+			Fields: map[string]string{"page": "must be greater than zero"},
+		}
+	}
+	if filter.PageSize == 0 {
+		filter.PageSize = audit.DefaultPageSize
+	}
+	if filter.PageSize < 0 || filter.PageSize > audit.MaxPageSize {
+		return audit.ListResult{}, &domain.ValidationError{
+			Fields: map[string]string{"page_size": "must be between 1 and 100"},
+		}
+	}
+
+	filter.EntityType = audit.EntityProcurement
+	filter.EntityID = strings.TrimSpace(id)
 	if s.audit == nil {
-		return []audit.Event{}, nil
+		return audit.ListResult{
+			Events:   []audit.Event{},
+			Page:     filter.Page,
+			PageSize: filter.PageSize,
+		}, nil
 	}
-	return s.audit.ListByEntity(ctx, audit.EntityProcurement, strings.TrimSpace(id), auditListLimit)
+	return s.audit.List(ctx, filter)
 }
 
 func (s *Service) mutate(

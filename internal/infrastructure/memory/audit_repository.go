@@ -8,11 +8,6 @@ import (
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 )
 
-const (
-	defaultAuditLimit = 200
-	maxAuditLimit     = 500
-)
-
 // AuditRepository is a thread-safe, in-memory append-only audit store used for
 // local development and tests.
 type AuditRepository struct {
@@ -44,21 +39,26 @@ func (r *AuditRepository) Append(ctx context.Context, event audit.Event) error {
 	return nil
 }
 
-// ListByEntity returns the newest events for one entity, up to limit.
-func (r *AuditRepository) ListByEntity(ctx context.Context, entityType, entityID string, limit int) ([]audit.Event, error) {
+// List returns a page of events for one entity, newest first.
+func (r *AuditRepository) List(ctx context.Context, filter audit.ListFilter) (audit.ListResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return audit.ListResult{}, err
 	}
 
-	if limit <= 0 {
-		limit = defaultAuditLimit
+	page := filter.Page
+	if page <= 0 {
+		page = 1
 	}
-	if limit > maxAuditLimit {
-		limit = maxAuditLimit
+	pageSize := filter.PageSize
+	if pageSize <= 0 {
+		pageSize = audit.DefaultPageSize
+	}
+	if pageSize > audit.MaxPageSize {
+		pageSize = audit.MaxPageSize
 	}
 
 	r.mu.RLock()
-	stored := r.events[auditKey(entityType, entityID)]
+	stored := r.events[auditKey(filter.EntityType, filter.EntityID)]
 	out := make([]audit.Event, len(stored))
 	for i, event := range stored {
 		event.Metadata = cloneMetadata(event.Metadata)
@@ -66,11 +66,32 @@ func (r *AuditRepository) ListByEntity(ctx context.Context, entityType, entityID
 	}
 	r.mu.RUnlock()
 
-	sort.SliceStable(out, func(i, j int) bool { return out[i].ID > out[j].ID })
-	if len(out) > limit {
-		out = out[:limit]
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].OccurredAt.Equal(out[j].OccurredAt) {
+			return out[i].OccurredAt.After(out[j].OccurredAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+
+	total := len(out)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
 	}
-	return out, nil
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+
+	pageEvents := make([]audit.Event, end-start)
+	copy(pageEvents, out[start:end])
+
+	return audit.ListResult{
+		Events:   pageEvents,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	}, nil
 }
 
 func auditKey(entityType, entityID string) string {

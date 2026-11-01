@@ -26,6 +26,9 @@ GET {{baseUrl}}/readyz
 ### OpenAPI document
 GET {{baseUrl}}/openapi.yaml
 
+### Metrics (Prometheus text format)
+GET {{baseUrl}}/metrics
+
 ### Create procurement
 # @name create
 POST {{baseUrl}}/api/v1/procurements
@@ -40,6 +43,36 @@ Content-Type: {{contentType}}
   "currency": "IDR"
 }
 
+### Create procurement with an idempotency key
+# Run this request twice: the second response is replayed from the first and
+# carries `Idempotent-Replayed: true`, so no duplicate is created.
+# @name createIdempotent
+POST {{baseUrl}}/api/v1/procurements
+Content-Type: {{contentType}}
+Idempotency-Key: demo-create-0001
+
+{
+  "title": "Idempotent laptop procurement",
+  "description": "Retry-safe request",
+  "department": "Engineering",
+  "requester": "Amir",
+  "amount": 15000000,
+  "currency": "IDR"
+}
+
+### Error: idempotency key reused with a different body (422)
+# Send after `createIdempotent`; the key is already bound to another payload.
+POST {{baseUrl}}/api/v1/procurements
+Content-Type: {{contentType}}
+Idempotency-Key: demo-create-0001
+
+{
+  "title": "Different payload for the same key",
+  "department": "Engineering",
+  "amount": 1,
+  "currency": "IDR"
+}
+
 ### List procurements (defaults)
 GET {{baseUrl}}/api/v1/procurements
 
@@ -49,8 +82,8 @@ GET {{baseUrl}}/api/v1/procurements?status=submitted&q=laptop&page=1&page_size=1
 ### Get procurement by ID
 GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}
 
-### Audit trail (newest first)
-GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/audit
+### Audit trail (newest first, first page)
+GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/audit?page=1&page_size=20
 
 ### Submit procurement
 POST {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/submit
@@ -95,6 +128,13 @@ Content-Type: text/plain
 
 ### Error: not found (404)
 GET {{baseUrl}}/api/v1/procurements/prc_missing
+
+### Error: invalid pagination (400)
+GET {{baseUrl}}/api/v1/procurements/{{create.response.body.$.data.id}}/audit?page=0
+
+### Error: rate limited (429)
+# Only returned once RATE_LIMIT_ENABLED=true and the caller's bucket is empty.
+GET {{baseUrl}}/api/v1/procurements
 
 ### Error: method not allowed (405)
 DELETE {{baseUrl}}/api/v1/procurements

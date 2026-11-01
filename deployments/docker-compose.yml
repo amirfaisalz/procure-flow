@@ -39,6 +39,12 @@ services:
       AUTH_ENABLED: "true"
       # Local-only credentials. Replace these before exposing the stack.
       AUTH_API_KEYS: '[{"token":"local-admin-token-0123456789","subject":"user_admin","name":"Local Admin","roles":["admin"]},{"token":"local-approver-token-0123456789","subject":"user_fin","name":"Finance Approver","roles":["approver"],"department":"Engineering"}]'
+      IDEMPOTENCY_ENABLED: "true"
+      IDEMPOTENCY_TTL: "24h"
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_RPS: "20"
+      RATE_LIMIT_BURST: "40"
+      METRICS_ENABLED: "true"
     depends_on:
       db:
         condition: service_healthy

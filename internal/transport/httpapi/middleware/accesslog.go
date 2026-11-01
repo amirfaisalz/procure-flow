@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/amirfaisalz/procure-flow/internal/platform/requestid"
+	"github.com/amirfaisalz/procure-flow/internal/platform/tracing"
 )
 
 // AccessLog emits one structured log record per request.
@@ -34,7 +35,7 @@ func AccessLog(logger *slog.Logger) Middleware {
 				level = slog.LevelWarn
 			}
 
-			logger.LogAttrs(r.Context(), level, "http request",
+			attrs := []slog.Attr{
 				slog.String("request_id", requestid.From(r.Context())),
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
@@ -44,7 +45,11 @@ func AccessLog(logger *slog.Logger) Middleware {
 				slog.Duration("duration", time.Since(start)),
 				slog.String("remote_addr", r.RemoteAddr),
 				slog.String("user_agent", r.UserAgent()),
-			)
+			}
+			if ids, ok := tracing.FromContext(r.Context()); ok {
+				attrs = append(attrs, slog.String("trace_id", ids.TraceID), slog.String("span_id", ids.SpanID))
+			}
+			logger.LogAttrs(r.Context(), level, "http request", attrs...)
 		})
 	}
 }

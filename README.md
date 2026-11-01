@@ -23,6 +23,10 @@ third-party web framework; PostgreSQL is reached through the pure-Go `pgx`
   with department scoping for approvers and ownership checks for requesters.
 - Append-only audit trail written in the same transaction as each change, with
   a database trigger that rejects updates and deletes.
+- Idempotent writes via `Idempotency-Key`, scoped per actor, with replay of the
+  stored response and rejection of key reuse with a different body.
+- Per-caller token-bucket rate limiting with `Retry-After` and rate-limit headers.
+- Prometheus metrics at `/metrics` and W3C Trace Context propagation.
 - Scalar API reference (OpenAPI 3.1) and an HTTP request collection.
 - CI that runs `gofmt`, `go vet`, race tests against PostgreSQL, and a build.
 
@@ -111,6 +115,12 @@ make run
 | `AUTH_JWT_ISSUER` | `procure-flow` | Required JWT `iss` |
 | `AUTH_JWT_AUDIENCE` | `procure-flow-api` | Required JWT `aud` |
 | `AUTH_JWT_LEEWAY` | `30s` | Clock-skew tolerance |
+| `IDEMPOTENCY_ENABLED` | `true` | Replay protection for write endpoints |
+| `IDEMPOTENCY_TTL` | `24h` | How long stored responses remain replayable |
+| `RATE_LIMIT_ENABLED` | `true` in staging/production, `false` in development | Enable per-caller limiting |
+| `RATE_LIMIT_RPS` | `20` | Sustained requests per second per caller |
+| `RATE_LIMIT_BURST` | `40` | Burst allowance per caller |
+| `METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
 | `DOCS_ENABLED` | `true` (non-production) | Serve `/docs` and `/openapi.yaml` |
 
 `HTTP_REQUEST_TIMEOUT` must not exceed `HTTP_WRITE_TIMEOUT`. Wildcard CORS
@@ -120,7 +130,7 @@ Production requires `DATABASE_URL`, `AUTH_ENABLED=true`, and at least one of
 
 ## Authentication and authorization
 
-`/healthz`, `/readyz`, `/docs`, and `/openapi.yaml` are public. Every
+`/healthz`, `/readyz`, `/metrics`, `/docs`, and `/openapi.yaml` are public. Every
 `/api/v1` route requires `Authorization: Bearer <token>`. A static API key or an
 HS256 JWT is accepted. JWTs must carry `sub`, `exp`, a valid `roles` claim, and
 match the configured issuer and audience.
@@ -153,9 +163,53 @@ On PostgreSQL the aggregate and the audit row share one transaction, so a
 failed audit write rolls back the change. Read the trail with:
 
 ```bash
-curl -s http://localhost:8080/api/v1/procurements/<id>/audit \
+curl -s 'http://localhost:8080/api/v1/procurements/<id>/audit?page=1&page_size=20' \
   -H 'Authorization: Bearer local-admin-token-0123456789'
 ```
+
+Events are returned newest first with `meta.page`, `meta.page_size`,
+`meta.total`, and `meta.total_pages`.
+
+### Idempotency
+
+`POST /api/v1/procurements` accepts an `Idempotency-Key` header. Keys are scoped
+per authenticated actor and stored for `IDEMPOTENCY_TTL`. A retry with the same
+key and body replays the original status, body, and `Location` header, marked
+with `Idempotent-Replayed: true`. Reusing a key with a different body returns
+`422 IDEMPOTENCY_KEY_REUSED`; a concurrent retry while the first request is
+still running returns `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1`.
+Responses with a 5xx status release the claim so the client can retry.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/procurements \
+  -H 'Authorization: Bearer local-admin-token-0123456789' \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 5b1c2a7e-create-1' \
+  -d '{"title":"Laptop procurement","department":"Engineering","amount":250000000,"currency":"IDR"}'
+```
+
+### Rate limiting
+
+Every `/api/v1` route is limited per caller: the authenticated subject when
+present, otherwise the remote IP address. The token bucket allows
+`RATE_LIMIT_BURST` immediate requests and refills at `RATE_LIMIT_RPS`. Responses
+carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; an exhausted bucket
+returns `429 RATE_LIMITED` with `Retry-After` in seconds.
+
+### Metrics and tracing
+
+`GET /metrics` exposes Prometheus text format:
+
+- `http_requests_total{method,route,status}`
+- `http_request_duration_seconds{method,route,status}` histogram
+
+The route label is the `ServeMux` pattern (for example
+`GET /api/v1/procurements/{id}`), so identifiers never inflate cardinality.
+The endpoint is public like the probes; restrict it at the network edge.
+
+Requests accept and emit W3C `traceparent`; `X-Trace-ID` echoes the trace
+identifier. Access logs include `trace_id` and `span_id`. Exporting spans to an
+OpenTelemetry backend is on the roadmap.
 
 ## Database and migrations
 
@@ -279,7 +333,8 @@ docker run --rm -p 8080:8080 \
   -e DATABASE_URL='postgres://user:pass@host:5432/procure?sslmode=disable' \
   -e AUTH_ENABLED=true \
   -e AUTH_API_KEYS='[{"token":"replace-me-0123456789","subject":"user_admin","name":"Admin","roles":["admin"]}]' \
-  procure-flow:local```
+  procure-flow:local
+```
 
 Or run the full stack:
 
@@ -290,6 +345,5 @@ docker compose -f deployments/docker-compose.yml up --build
 ## Roadmap
 
 - OIDC discovery and key rotation for JWT verification.
-- OpenTelemetry tracing and Prometheus metrics.
-- Rate limiting and idempotency keys.
-- Kubernetes manifests and load/fuzz tests.
+- OpenTelemetry span export (trace context propagation already exists).
+- Kubernetes manifests, backup/retention policy, and load/fuzz tests.

@@ -12,6 +12,9 @@ coverage.html
 *.test
 *.prof
 
+# Local build caches
+.tmp/
+
 # Local configuration
 .env
 .env.local

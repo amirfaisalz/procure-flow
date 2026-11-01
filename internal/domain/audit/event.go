@@ -9,6 +9,13 @@ import (
 // EntityProcurement is the entity type for procurement events.
 const EntityProcurement = "procurement"
 
+const (
+	// DefaultPageSize is used when the caller does not request a page size.
+	DefaultPageSize = 20
+	// MaxPageSize bounds repository and API response sizes.
+	MaxPageSize = 100
+)
+
 // Event is one immutable audit record.
 type Event struct {
 	ID         int64             `json:"id"`
@@ -24,8 +31,32 @@ type Event struct {
 	OccurredAt time.Time         `json:"occurred_at"`
 }
 
+// ListFilter selects one page of events for a single entity.
+type ListFilter struct {
+	EntityType string
+	EntityID   string
+	Page       int
+	PageSize   int
+}
+
+// ListResult is a single page of audit events, newest first.
+type ListResult struct {
+	Events   []Event
+	Total    int
+	Page     int
+	PageSize int
+}
+
+// TotalPages returns the number of pages for the result set.
+func (r ListResult) TotalPages() int {
+	if r.Total == 0 || r.PageSize <= 0 {
+		return 0
+	}
+	return (r.Total + r.PageSize - 1) / r.PageSize
+}
+
 // Repository is the append-only persistence port for audit events.
 type Repository interface {
 	Append(ctx context.Context, event Event) error
-	ListByEntity(ctx context.Context, entityType, entityID string, limit int) ([]Event, error)
+	List(ctx context.Context, filter ListFilter) (ListResult, error)
 }
