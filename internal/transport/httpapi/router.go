@@ -22,7 +22,7 @@ type Dependencies struct {
 	Health        *handler.Health
 	Authenticator auth.Authenticator
 	Idempotency   idempotency.Repository
-	RateLimiter   *ratelimit.Limiter
+	RateLimiter   ratelimit.Limiter
 	Metrics       *metrics.Registry
 }
 

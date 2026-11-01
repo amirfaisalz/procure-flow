@@ -3,7 +3,8 @@
 Enterprise procurement workflow API built on the Go standard library
 (`net/http`, Go 1.22+ routing, `log/slog`, `database/sql`). There is no
 third-party web framework; PostgreSQL is reached through the pure-Go `pgx`
-`database/sql` driver.
+driver. Redis provides shared rate limiting and read caching, and RabbitMQ
+carries lifecycle events to an asynchronous worker.
 
 ## Features
 
@@ -25,15 +26,23 @@ third-party web framework; PostgreSQL is reached through the pure-Go `pgx`
   a database trigger that rejects updates and deletes.
 - Idempotent writes via `Idempotency-Key`, scoped per actor, with replay of the
   stored response and rejection of key reuse with a different body.
-- Per-caller token-bucket rate limiting with `Retry-After` and rate-limit headers.
+- Per-caller token-bucket rate limiting with `Retry-After` and rate-limit
+  headers; optionally shared across replicas through Redis, with an in-process
+  fallback when Redis is unavailable.
+- Read-through Redis cache for single-procurement reads, invalidated on every
+  write and bounded by a TTL.
+- Transactional outbox + RabbitMQ topic exchange: lifecycle events are
+  published with confirms, and a worker performs requester notifications and
+  ERP syncs without blocking the HTTP response.
 - Prometheus metrics at `/metrics` and W3C Trace Context propagation.
 - Scalar API reference (OpenAPI 3.1) and an HTTP request collection.
-- CI that runs `gofmt`, `go vet`, race tests against PostgreSQL, and a build.
+- CI that runs `gofmt`, `go vet`, race tests against PostgreSQL, Redis, and
+  RabbitMQ, and a build.
 
 ## Requirements
 
 - Go 1.26+
-- Docker (optional, for the local PostgreSQL and container image)
+- Docker (optional, for PostgreSQL, Redis, RabbitMQ, and container images)
 
 ## Quick start
 
@@ -79,6 +88,27 @@ make run            # migrations run automatically on startup
 The compose stack (`make db-up` then `docker compose -f deployments/docker-compose.yml up api`)
 runs the API and database together.
 
+### Redis and RabbitMQ (asynchronous stack)
+
+Redis and RabbitMQ are optional. Start them locally and point the API at them:
+
+```bash
+make deps-up        # PostgreSQL :55432, Redis :56379, RabbitMQ :5672
+export REDIS_URL=redis://127.0.0.1:56379/0
+export RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
+export RATE_LIMIT_STORE=redis
+make run
+make worker         # in a second terminal
+```
+
+The worker logs one notification per lifecycle event and simulates the ERP sync
+unless webhooks are configured. To run the whole stack in containers, including
+the worker:
+
+```bash
+docker compose -f deployments/docker-compose.yml up --build
+```
+
 ## Configuration
 
 Configuration is read from environment variables. See
@@ -121,12 +151,21 @@ make run
 | `RATE_LIMIT_RPS` | `20` | Sustained requests per second per caller |
 | `RATE_LIMIT_BURST` | `40` | Burst allowance per caller |
 | `METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
+| `REDIS_URL` | *(empty)* | `redis://` or `rediss://` URL; enables shared state |
+| `CACHE_ENABLED` | `true` when `REDIS_URL` is set | Read-through cache for GET by id |
+| `CACHE_TTL` | `30s` | Maximum staleness bound for cached aggregates |
+| `RATE_LIMIT_STORE` | `auto` | `auto`, `memory`, or `redis`; redis requires `REDIS_URL` |
+| `RABBITMQ_URL` | *(empty)* | `amqp://` or `amqps://` URL; enables async events |
+| `RABBITMQ_EXCHANGE` | `procure.events` | Durable topic exchange for lifecycle events |
+| `NOTIFICATION_WEBHOOK_URL` | *(empty)* | Worker POSTs requester notifications here |
+| `ERP_WEBHOOK_URL` | *(empty)* | Worker POSTs approved procurements here |
 | `DOCS_ENABLED` | `true` (non-production) | Serve `/docs` and `/openapi.yaml` |
 
 `HTTP_REQUEST_TIMEOUT` must not exceed `HTTP_WRITE_TIMEOUT`. Wildcard CORS
 origins are rejected. `DB_MAX_IDLE_CONNS` must not exceed `DB_MAX_OPEN_CONNS`.
 Production requires `DATABASE_URL`, `AUTH_ENABLED=true`, and at least one of
-`AUTH_API_KEYS` or `AUTH_JWT_SECRET`.
+`AUTH_API_KEYS` or `AUTH_JWT_SECRET`. `RATE_LIMIT_STORE=redis` requires
+`REDIS_URL`, and webhook URLs must use HTTP or HTTPS.
 
 ## Authentication and authorization
 
@@ -196,6 +235,24 @@ present, otherwise the remote IP address. The token bucket allows
 carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; an exhausted bucket
 returns `429 RATE_LIMITED` with `Retry-After` in seconds.
 
+With `RATE_LIMIT_STORE=redis` (or `auto` plus `REDIS_URL`) the bucket lives in
+Redis and is updated by an atomic Lua script, so all API replicas share one
+limit. If Redis fails, the middleware falls back to a per-process bucket and
+keeps serving traffic; if both backends fail, requests are allowed and the
+failure is logged.
+
+### Caching
+
+`GET /api/v1/procurements/{id}` uses cache-aside: a miss loads the aggregate
+from PostgreSQL and stores it as JSON in Redis for `CACHE_TTL`; create, submit,
+approve, reject, and cancel delete the key after the transaction commits. Cache
+errors are treated as misses and never fail a request, and a short TTL bounds
+staleness if an invalidation races with a concurrent read.
+
+Keys are versioned (`procurement:v1:<id>`) so an incompatible aggregate change
+can be rolled out by bumping the prefix. List results are not cached because
+filter and pagination combinations would explode the key space.
+
 ### Metrics and tracing
 
 `GET /metrics` exposes Prometheus text format:
@@ -210,6 +267,40 @@ The endpoint is public like the probes; restrict it at the network edge.
 Requests accept and emit W3C `traceparent`; `X-Trace-ID` echoes the trace
 identifier. Access logs include `trace_id` and `span_id`. Exporting spans to an
 OpenTelemetry backend is on the roadmap.
+
+### Asynchronous events (RabbitMQ)
+
+When `RABBITMQ_URL` is set, every lifecycle change writes an outbox row in the
+same transaction as the aggregate update and audit event. A relay inside the API
+leases due rows (`FOR UPDATE SKIP LOCKED`), publishes the event envelope to the
+topic exchange in confirm mode, and marks the row published. Failures back off
+from 1s to 5m and are retried; a crash after publish but before the mark causes
+a duplicate, so delivery is at-least-once. Without a broker URL, no outbox rows
+are written at all.
+
+Routing keys are the event types (`procurement.created`, `submitted`,
+`approved`, `rejected`, `cancelled`). `cmd/worker` declares two durable queues:
+
+- `procure.notifications` binds every lifecycle key and notifies the requester.
+- `procure.integrations` binds `procurement.approved` and syncs with the ERP.
+
+Handlers retry three times with exponential backoff and are then dead-lettered
+to `<queue>.dlq` through `<queue>.dlx`. Notification and ERP payloads include
+the `event_id`, so external systems can deduplicate redeliveries. When a webhook
+is not configured the worker logs the action, which keeps the flow runnable
+locally. Run it with `make worker` (or the `worker` compose service):
+
+```bash
+RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/ \
+NOTIFICATION_WEBHOOK_URL=https://hooks.example.com/notify \
+ERP_WEBHOOK_URL=https://erp.example.com/procurements \
+make worker
+```
+
+The event envelope is `{id, type, aggregate_type, aggregate_id, actor_id,
+occurred_at, payload}`; the payload carries a procurement snapshot (`number`,
+`title`, `department`, `requester`, `amount`, `currency`, `status`,
+`from_status`, `version`, `actor`).
 
 ## Database and migrations
 
@@ -230,11 +321,13 @@ instead of application startup.
 ## Development
 
 ```bash
-make test              # go test ./... (integration tests skip without a DB)
+make test              # go test ./... (integration tests skip without services)
 make test-race         # go test -race ./...
-make test-integration  # race tests against the local PostgreSQL
-make db-up             # start PostgreSQL
-make db-reset          # destroy the volume and recreate
+make test-integration  # race tests against PostgreSQL, Redis, and RabbitMQ
+make deps-up           # start PostgreSQL, Redis, and RabbitMQ
+make db-up             # start only PostgreSQL
+make db-reset          # destroy the database volume and recreate
+make worker            # run the async worker (needs RABBITMQ_URL)
 make cover             # coverage report
 make vet               # go vet ./...
 make fmt               # gofmt -w
@@ -249,13 +342,17 @@ against both the in-memory and PostgreSQL adapters.
 
 ```
 cmd/api/                       application entrypoint
+cmd/worker/                    async notification and ERP worker
 cmd/migrate/                   migration CLI (up, down, status)
 internal/config/               environment configuration
 internal/domain/               shared domain errors
 internal/domain/procurement/   aggregate, state machine, repository port
-internal/application/          use-case services
-internal/infrastructure/       memory + PostgreSQL adapters, repository contract tests
-internal/platform/             request IDs, ID generator, logging
+internal/domain/event/         event envelope
+internal/domain/outbox/        transactional outbox port
+internal/application/          use-case services, cache port, event emission
+internal/infrastructure/       memory + PostgreSQL + Redis + RabbitMQ adapters
+internal/platform/             request IDs, ID generator, logging, rate limiting,
+                               metrics, tracing, outbox relay
 internal/transport/httpapi/    router, handlers, middleware, response helpers
 api/                           OpenAPI contract + HTTP request collection
 configs/                       example configuration
@@ -336,7 +433,9 @@ docker run --rm -p 8080:8080 \
   procure-flow:local
 ```
 
-Or run the full stack:
+The image contains both binaries: `/api` is the default entrypoint and
+`/worker` runs the asynchronous consumers. Or run the full stack, including
+Redis, RabbitMQ, and the worker:
 
 ```bash
 docker compose -f deployments/docker-compose.yml up --build
@@ -346,4 +445,5 @@ docker compose -f deployments/docker-compose.yml up --build
 
 - OIDC discovery and key rotation for JWT verification.
 - OpenTelemetry span export (trace context propagation already exists).
-- Kubernetes manifests, backup/retention policy, and load/fuzz tests.
+- Kubernetes manifests, broker-level dead-letter replay tooling, backup and
+  retention policy, and load/fuzz tests.

@@ -97,6 +97,28 @@ The primary key is `(actor_id, key)`. Claims are inserted with
 `ON CONFLICT DO NOTHING`, so concurrent retries cannot both execute. Expired
 rows can be reclaimed atomically; the `expires_at` index supports cleanup.
 
+### `outbox_events`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `text` | event identifier (`evt_…`) |
+| `event_type` | `text` | lifecycle type and AMQP routing key |
+| `aggregate_type` | `text` | `procurement` |
+| `aggregate_id` | `text` | procurement ID |
+| `actor_id` | `text` | authenticated subject |
+| `payload` | `jsonb` | event body |
+| `occurred_at` | `timestamptz` | when the change happened |
+| `next_attempt_at` | `timestamptz` | earliest next delivery attempt |
+| `attempts` | `integer` | failed delivery attempts |
+| `last_error` | `text` | last delivery error |
+| `published_at` | `timestamptz` | null until the broker confirms |
+| `created_at` | `timestamptz` | insert time |
+
+Rows are written in the same transaction as the aggregate and audit event. The
+relay claims due rows with `FOR UPDATE SKIP LOCKED`, leases them by moving
+`next_attempt_at` forward, and marks `published_at` after a confirmed publish.
+Partial indexes cover pending claims and retention pruning.
+
 ### `schema_migrations`
 
 Managed by the runner: `version text primary key`, `applied_at timestamptz`.

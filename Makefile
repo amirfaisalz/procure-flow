@@ -7,6 +7,8 @@ DOCKER_IMAGE ?= procure-flow:local
 BASE_URL    ?= http://localhost:8080
 COMPOSE     := docker compose -f deployments/docker-compose.yml
 TEST_DATABASE_URL ?= postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable
+TEST_REDIS_URL ?= redis://127.0.0.1:56379/0
+TEST_RABBITMQ_URL ?= amqp://guest:guest@127.0.0.1:5672/
 
 .DEFAULT_GOAL := help
 
@@ -18,10 +20,19 @@ help: ## Show available targets
 run: ## Run the API locally
 	go run $(CMD)
 
+.PHONY: worker
+worker: ## Run the async worker locally (requires RABBITMQ_URL)
+	go run ./cmd/worker
+
 .PHONY: build
 build: ## Build the API binary into bin/
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) $(CMD)
+
+.PHONY: build-worker
+build-worker: ## Build the worker binary into bin/
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o $(BIN_DIR)/$(BINARY)-worker ./cmd/worker
 
 .PHONY: test
 test: ## Run all tests
@@ -32,8 +43,11 @@ test-race: ## Run all tests with the race detector
 	go test -race ./...
 
 .PHONY: test-integration
-test-integration: ## Run all tests, including PostgreSQL integration tests
-	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -count=1 ./...
+test-integration: ## Run all tests against PostgreSQL, Redis, and RabbitMQ
+	TEST_DATABASE_URL="$(TEST_DATABASE_URL)" \
+	TEST_REDIS_URL="$(TEST_REDIS_URL)" \
+	TEST_RABBITMQ_URL="$(TEST_RABBITMQ_URL)" \
+	go test -race -count=1 ./...
 
 .PHONY: cover
 cover: ## Run tests with a coverage summary
@@ -59,6 +73,11 @@ tidy: ## Tidy modules
 db-up: ## Start the local PostgreSQL container
 	$(COMPOSE) up -d db
 	@echo "PostgreSQL ready on 127.0.0.1:55432 (user/password/db: procure)"
+
+.PHONY: deps-up
+deps-up: ## Start PostgreSQL, Redis, and RabbitMQ
+	$(COMPOSE) up -d db redis rabbitmq
+	@echo "PostgreSQL :55432, Redis :56379, RabbitMQ :5672 (management :15672)"
 
 .PHONY: db-down
 db-down: ## Stop the local stack (keeps the volume)

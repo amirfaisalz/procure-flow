@@ -15,18 +15,31 @@ import (
 // RateLimit rejects requests that exceed the per-caller token bucket. Callers
 // are identified by authenticated subject when available, otherwise by remote
 // IP address.
-func RateLimit(limiter *ratelimit.Limiter, logger *slog.Logger) Middleware {
+func RateLimit(limiter ratelimit.Limiter, logger *slog.Logger) Middleware {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			result := limiter.Allow(rateLimitKey(r))
-
-			if limiter != nil {
-				w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limiter.Burst()))
+			if limiter == nil {
+				next.ServeHTTP(w, r)
+				return
 			}
+
+			result, err := limiter.Allow(r.Context(), rateLimitKey(r))
+			if err != nil {
+				// The limiter is an availability aid, not an authorization
+				// boundary: if every backend fails, keep serving traffic.
+				logger.ErrorContext(r.Context(), "rate limiter failed; allowing request",
+					slog.String("request_id", requestid.From(r.Context())),
+					slog.String("error", err.Error()),
+				)
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(limiter.Burst()))
 			w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(result.Remaining))
 
 			if !result.Allowed {

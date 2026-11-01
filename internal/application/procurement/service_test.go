@@ -35,6 +35,7 @@ type fakeRepo struct {
 	createCalled bool
 	createCalls  int
 	getCalled    bool
+	getCalls     int
 	updateCalled bool
 	listCalled   bool
 
@@ -60,6 +61,7 @@ func (f *fakeRepo) Create(_ context.Context, p domainproc.Procurement) error {
 
 func (f *fakeRepo) GetByID(_ context.Context, id string) (domainproc.Procurement, error) {
 	f.getCalled = true
+	f.getCalls++
 	if f.getErr != nil {
 		return domainproc.Procurement{}, f.getErr
 	}

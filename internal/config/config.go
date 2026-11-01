@@ -29,16 +29,42 @@ func (e Env) IsProduction() bool {
 
 // Config is the fully validated application configuration.
 type Config struct {
-	Env         Env
-	LogLevel    slog.Level
-	HTTP        HTTP
-	CORS        CORS
-	Docs        Docs
-	Database    Database
-	Auth        Auth
-	Idempotency Idempotency
-	RateLimit   RateLimit
-	Metrics     Metrics
+	Env          Env
+	LogLevel     slog.Level
+	HTTP         HTTP
+	CORS         CORS
+	Docs         Docs
+	Database     Database
+	Auth         Auth
+	Idempotency  Idempotency
+	RateLimit    RateLimit
+	Metrics      Metrics
+	Redis        Redis
+	RabbitMQ     RabbitMQ
+	Integrations Integrations
+}
+
+// Redis controls the optional Redis client used for distributed rate limiting
+// and read-through caching. An empty URL disables both.
+type Redis struct {
+	URL            string
+	CacheEnabled   bool
+	CacheTTL       time.Duration
+	DialTimeout    time.Duration
+	CommandTimeout time.Duration
+}
+
+// RabbitMQ controls asynchronous event publishing. An empty URL disables the
+// outbox relay, and the worker has nothing to consume.
+type RabbitMQ struct {
+	URL      string
+	Exchange string
+}
+
+// Integrations configures the optional outbound webhooks used by the worker.
+type Integrations struct {
+	NotificationWebhookURL string
+	ERPWebhookURL          string
 }
 
 // Idempotency controls replay protection for write endpoints.
@@ -52,7 +78,17 @@ type RateLimit struct {
 	Enabled           bool
 	RequestsPerSecond float64
 	Burst             int
+	// Store is "auto", "memory", or "redis". Auto uses Redis when REDIS_URL is
+	// set and falls back to the in-process limiter otherwise.
+	Store string
 }
+
+// Rate limit store choices.
+const (
+	RateLimitStoreAuto   = "auto"
+	RateLimitStoreMemory = "memory"
+	RateLimitStoreRedis  = "redis"
+)
 
 // Metrics controls the Prometheus exposition endpoint.
 type Metrics struct {
@@ -118,6 +154,37 @@ func Load() (Config, error) {
 
 // LoadFrom is the testable form of Load.
 func LoadFrom(getenv func(string) string) (Config, error) {
+	cfg, err := loadFrom(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := cfg.validateServer(); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// LoadWorker reads configuration for the asynchronous worker. Server-only
+// requirements (a database and authentication) are not enforced, but a broker
+// URL is mandatory.
+func LoadWorker() (Config, error) {
+	return LoadWorkerFrom(os.Getenv)
+}
+
+// LoadWorkerFrom is the testable form of LoadWorker.
+func LoadWorkerFrom(getenv func(string) string) (Config, error) {
+	cfg, err := loadFrom(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.RabbitMQ.URL == "" {
+		return Config{}, fmt.Errorf("RABBITMQ_URL: required for the worker")
+	}
+	return cfg, nil
+}
+
+// loadFrom parses every setting without applying deployment-specific policy.
+func loadFrom(getenv func(string) string) (Config, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
@@ -172,27 +239,45 @@ func LoadFrom(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	cfg := Config{
-		Env:         env,
-		LogLevel:    level,
-		HTTP:        httpConfig,
-		CORS:        corsConfig,
-		Docs:        docsConfig,
-		Database:    databaseConfig,
-		Auth:        authConfig,
-		Idempotency: idempotencyConfig,
-		RateLimit:   rateLimitConfig,
-		Metrics:     metricsConfig,
-	}
-	if err := cfg.validate(); err != nil {
+	redisConfig, err := loadRedis(getenv)
+	if err != nil {
 		return Config{}, err
+	}
+
+	rabbitConfig, err := loadRabbitMQ(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+
+	integrationsConfig, err := loadIntegrations(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg := Config{
+		Env:          env,
+		LogLevel:     level,
+		HTTP:         httpConfig,
+		CORS:         corsConfig,
+		Docs:         docsConfig,
+		Database:     databaseConfig,
+		Auth:         authConfig,
+		Idempotency:  idempotencyConfig,
+		RateLimit:    rateLimitConfig,
+		Metrics:      metricsConfig,
+		Redis:        redisConfig,
+		RabbitMQ:     rabbitConfig,
+		Integrations: integrationsConfig,
 	}
 	return cfg, nil
 }
 
-func (c Config) validate() error {
+func (c Config) validateServer() error {
 	if c.HTTP.RequestTimeout > c.HTTP.WriteTimeout {
 		return fmt.Errorf("HTTP_REQUEST_TIMEOUT: must be less than or equal to HTTP_WRITE_TIMEOUT")
+	}
+	if c.RateLimit.Enabled && c.RateLimit.Store == RateLimitStoreRedis && c.Redis.URL == "" {
+		return fmt.Errorf("RATE_LIMIT_STORE: redis requires REDIS_URL")
 	}
 	if c.Env.IsProduction() {
 		if c.Database.URL == "" {
@@ -239,11 +324,134 @@ func loadRateLimit(getenv func(string) string, env Env) (RateLimit, error) {
 	if err != nil {
 		return RateLimit{}, err
 	}
+	store, err := parseRateLimitStore(getenv("RATE_LIMIT_STORE"))
+	if err != nil {
+		return RateLimit{}, err
+	}
 	return RateLimit{
 		Enabled:           enabled,
 		RequestsPerSecond: requestsPerSecond,
 		Burst:             burst,
+		Store:             store,
 	}, nil
+}
+
+func parseRateLimitStore(raw string) (string, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return RateLimitStoreAuto, nil
+	}
+	switch raw {
+	case RateLimitStoreAuto, RateLimitStoreMemory, RateLimitStoreRedis:
+		return raw, nil
+	default:
+		return "", fmt.Errorf("RATE_LIMIT_STORE: must be auto, memory, or redis")
+	}
+}
+
+func loadRedis(getenv func(string) string) (Redis, error) {
+	cfg := Redis{
+		URL:            strings.TrimSpace(getenv("REDIS_URL")),
+		CacheTTL:       30 * time.Second,
+		DialTimeout:    2 * time.Second,
+		CommandTimeout: time.Second,
+	}
+
+	cacheEnabled, err := boolEnv(getenv, "CACHE_ENABLED", cfg.URL != "")
+	if err != nil {
+		return Redis{}, err
+	}
+	if cacheEnabled && cfg.URL == "" {
+		return Redis{}, fmt.Errorf("CACHE_ENABLED: requires REDIS_URL")
+	}
+	cfg.CacheEnabled = cacheEnabled
+
+	if cfg.CacheTTL, err = durationEnv(getenv, "CACHE_TTL", cfg.CacheTTL); err != nil {
+		return Redis{}, err
+	}
+	if cfg.DialTimeout, err = durationEnv(getenv, "REDIS_DIAL_TIMEOUT", cfg.DialTimeout); err != nil {
+		return Redis{}, err
+	}
+	if cfg.CommandTimeout, err = durationEnv(getenv, "REDIS_COMMAND_TIMEOUT", cfg.CommandTimeout); err != nil {
+		return Redis{}, err
+	}
+
+	if cfg.URL != "" {
+		u, err := url.Parse(cfg.URL)
+		if err != nil {
+			return Redis{}, fmt.Errorf("REDIS_URL: invalid URL: %w", err)
+		}
+		if u.Scheme != "redis" && u.Scheme != "rediss" {
+			return Redis{}, fmt.Errorf("REDIS_URL: scheme must be redis or rediss, got %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return Redis{}, fmt.Errorf("REDIS_URL: must include a host")
+		}
+	}
+
+	return cfg, nil
+}
+
+func loadRabbitMQ(getenv func(string) string) (RabbitMQ, error) {
+	cfg := RabbitMQ{
+		URL:      strings.TrimSpace(getenv("RABBITMQ_URL")),
+		Exchange: strings.TrimSpace(getenv("RABBITMQ_EXCHANGE")),
+	}
+	if cfg.Exchange == "" {
+		cfg.Exchange = "procure.events"
+	}
+
+	if cfg.URL != "" {
+		u, err := url.Parse(cfg.URL)
+		if err != nil {
+			return RabbitMQ{}, fmt.Errorf("RABBITMQ_URL: invalid URL: %w", err)
+		}
+		if u.Scheme != "amqp" && u.Scheme != "amqps" {
+			return RabbitMQ{}, fmt.Errorf("RABBITMQ_URL: scheme must be amqp or amqps, got %q", u.Scheme)
+		}
+		if u.Host == "" {
+			return RabbitMQ{}, fmt.Errorf("RABBITMQ_URL: must include a host")
+		}
+	}
+
+	return cfg, nil
+}
+
+func loadIntegrations(getenv func(string) string) (Integrations, error) {
+	cfg := Integrations{
+		NotificationWebhookURL: strings.TrimSpace(getenv("NOTIFICATION_WEBHOOK_URL")),
+		ERPWebhookURL:          strings.TrimSpace(getenv("ERP_WEBHOOK_URL")),
+	}
+
+	for _, item := range []struct {
+		key   string
+		value string
+	}{
+		{"NOTIFICATION_WEBHOOK_URL", cfg.NotificationWebhookURL},
+		{"ERP_WEBHOOK_URL", cfg.ERPWebhookURL},
+	} {
+		if item.value == "" {
+			continue
+		}
+		if err := validateWebhookURL(item.value); err != nil {
+			return Integrations{}, fmt.Errorf("%s: %w", item.key, err)
+		}
+	}
+	return cfg, nil
+}
+
+func validateWebhookURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("must use http or https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("must include a host")
+	}
+	return nil
 }
 
 func loadMetrics(getenv func(string) string) (Metrics, error) {

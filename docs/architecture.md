@@ -3,26 +3,34 @@
 ## Goals
 
 - Keep business rules independent of HTTP and storage.
-- Use the Go standard library for HTTP, logging, and SQL (`database/sql`). The
-  only runtime dependency is the pure-Go `pgx` database driver.
+- Use the Go standard library for HTTP, logging, and SQL (`database/sql`).
+  Runtime dependencies are limited to the drivers and clients that speak the
+  infrastructure protocols: pure-Go `pgx` for PostgreSQL, `go-redis` for Redis,
+  and `amqp091-go` for RabbitMQ.
 - Make failure modes explicit (typed errors, problem documents, timeouts).
 - Make the HTTP layer testable end-to-end without a live database.
 
 ## Layers
 
 ```
-cmd/api
+cmd/api                                HTTP entrypoint + outbox relay
+cmd/worker                             asynchronous consumer entrypoint
+cmd/migrate                            migration CLI
   └─ internal/transport/httpapi        (HTTP adapter)
        ├─ handler                      request/response mapping
        ├─ middleware                   cross-cutting concerns
        └─ response                     JSON + RFC 9457 helpers
-  └─ internal/application/procurement  (use cases)
+  └─ internal/application/procurement  (use cases, cache port, event emission)
   └─ internal/domain/procurement       (aggregate + repository port)
   └─ internal/domain/audit             (append-only audit port)
+  └─ internal/domain/event             (event envelope)
+  └─ internal/domain/outbox            (transactional outbox port)
        └─ internal/infrastructure/memory   (local adapters)
        └─ internal/infrastructure/postgres (production adapters)
+       └─ internal/infrastructure/redis   (limiter client + JSON cache)
+       └─ internal/infrastructure/rabbitmq (publisher + consumers)
   └─ internal/platform                 (IDs, request IDs, logging, auth,
-                                        rate limiting, metrics, tracing)
+                                        rate limiting, metrics, tracing, relay)
   └─ internal/config                   (environment configuration)
 ```
 
@@ -157,6 +165,60 @@ pattern, keeping cardinality bounded. `internal/platform/tracing` parses and
 emits W3C `traceparent`, stores trace/span IDs in context, and feeds them into
 access logs; span export to an OpenTelemetry backend is not yet implemented.
 
+### Redis
+
+When `REDIS_URL` is set the API creates one `go-redis` client and derives two
+independent capabilities from it:
+
+- **Shared rate limiting.** `ratelimit.RedisLimiter` runs a token bucket as a
+  Lua script (`HMGET`/`HSET`/`PEXPIRE`), so refill and consume are atomic across
+  replicas. `ratelimit.Fallback` keeps an in-process `Memory` bucket and uses it
+  if Redis errors, and the middleware allows traffic if both fail. Limits stay
+  advisory during an outage instead of taking the API down.
+- **Read-through cache.** `Redis.Cache` stores JSON under versioned keys and
+  treats decode errors as misses (deleting the corrupt entry). The service
+  reads through it only in `Get`; mutations bypass it inside their transaction
+  and delete the key after commit. A miss populating the cache for `CACHE_TTL`
+  bounds the staleness window if an invalidation races with a read.
+
+Redis is never a source of truth: every cached value is reconstructible from
+PostgreSQL and every rate-limit decision degrades to local state.
+
+### Events: outbox, relay, worker
+
+The write path never talks to RabbitMQ directly. A lifecycle change writes
+
+1. the aggregate row,
+2. the audit event, and
+3. an `outbox_events` row
+
+inside one transaction. This is the transactional outbox pattern: either all
+three commit or none do, so an event can never describe a change that rolled
+back and a committed change can never lose its event.
+
+`internal/platform/relay` polls due rows:
+
+1. `Claim` selects unpublished rows whose backoff elapsed and leases them with
+   `FOR UPDATE SKIP LOCKED`, moving `next_attempt_at` forward by the lease.
+2. Each event is published to the durable topic exchange in confirm mode.
+3. Success sets `published_at`; failure increments `attempts`, records
+   `last_error`, and schedules an exponential backoff (1s … 5m). A crash after
+   publish but before step 3 redelivers the event, so consumers must be
+   idempotent: delivery is at-least-once.
+
+`cmd/worker` declares durable queues against the exchange and acknowledges
+manually:
+
+| Queue | Routing keys | Handler |
+| --- | --- | --- |
+| `procure.notifications` | `procurement.*` | notify the requester (webhook or log) |
+| `procure.integrations` | `procurement.approved` | ERP sync (webhook or log) |
+
+A handler is retried three times with exponential backoff; afterwards the
+message is dead-lettered to `<queue>.dlq` via `<queue>.dlx`. Without a configured
+broker URL the service does not write outbox rows at all, so an API-only
+deployment accumulates nothing.
+
 ### Migrations
 
 `migrations/*.sql` are embedded with `//go:embed` and applied by
@@ -241,8 +303,11 @@ Unknown errors are logged with the request ID and never expose internal detail.
 1. Load and validate configuration (production requires `DATABASE_URL` and
    authentication).
 2. Open PostgreSQL and apply migrations, or fall back to the in-memory adapters.
-3. Build the credential chain, rate limiter, metrics registry, logger, service,
-   health checks, and router.
+3. Create the Redis client (if configured) and assemble the cache and limiter.
+4. Create the RabbitMQ publisher (if configured), register its readiness check,
+   and start the outbox relay goroutine.
+5. Build the credential chain, metrics registry, logger, service, health checks,
+   and router.
 4. `net.Listen` first so binding errors surface before serving.
 5. `Serve` in a goroutine.
 6. On `SIGINT`/`SIGTERM`, call `Shutdown` with a bounded context.
@@ -258,12 +323,23 @@ Unknown errors are logged with the request ID and never expose internal detail.
 - Idempotency: repository claim/replay contract against memory and PostgreSQL,
   plus middleware tests for replay, key reuse, in-progress, 5xx release, and
   actor isolation.
-- Rate limiting and metrics: token-bucket refill/pruning, 429 mapping, and
-  Prometheus rendering with bounded route labels.
+- Rate limiting and metrics: token-bucket refill/pruning, Redis Lua bucket
+  atomicity across clients, fallback behaviour, 429 mapping, and Prometheus
+  rendering with bounded route labels.
+- Caching: hit/miss behaviour, write invalidation, and graceful degradation on
+  cache errors (fake cache), plus Redis set/get/TTL/corruption tests.
+- Outbox: one shared contract for memory and PostgreSQL covering enqueue,
+  ordered claiming, lease expiry, publish, backoff, and pruning; relay tests
+  cover publish success, failure scheduling, and shutdown.
+- Events: the service emits the right type and payload per transition and
+  fails the transaction when the outbox write fails.
+- Messaging: publisher confirm round-trip against RabbitMQ, consumer
+  ack/retry/dead-letter decisions, and webhook handler payloads.
 - Infrastructure: a shared repository contract run against memory and
   PostgreSQL, covering concurrency, uniqueness, filtering, pagination, and
-  context cancellation. PostgreSQL tests are gated by `TEST_DATABASE_URL`.
+  context cancellation. PostgreSQL, Redis, and RabbitMQ tests are gated by
+  `TEST_DATABASE_URL`, `TEST_REDIS_URL`, and `TEST_RABBITMQ_URL`.
 - Transport: end-to-end `httptest` coverage of status codes, envelopes, and
   problem documents; server lifecycle tests with real listeners.
-- `go test -race ./...` is part of the definition of done; CI runs it against a
-  PostgreSQL service container.
+- `go test -race ./...` is part of the definition of done; CI runs it against
+  PostgreSQL, Redis, and RabbitMQ service containers.

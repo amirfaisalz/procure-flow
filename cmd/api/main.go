@@ -11,18 +11,24 @@ import (
 	"syscall"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 	"github.com/amirfaisalz/procure-flow/internal/domain/idempotency"
+	"github.com/amirfaisalz/procure-flow/internal/domain/outbox"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/postgres"
+	"github.com/amirfaisalz/procure-flow/internal/infrastructure/rabbitmq"
+	redisstore "github.com/amirfaisalz/procure-flow/internal/infrastructure/redis"
 	"github.com/amirfaisalz/procure-flow/internal/platform/auth"
 	"github.com/amirfaisalz/procure-flow/internal/platform/id"
 	"github.com/amirfaisalz/procure-flow/internal/platform/logging"
 	"github.com/amirfaisalz/procure-flow/internal/platform/metrics"
 	"github.com/amirfaisalz/procure-flow/internal/platform/ratelimit"
+	"github.com/amirfaisalz/procure-flow/internal/platform/relay"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/handler"
 	"github.com/amirfaisalz/procure-flow/migrations"
@@ -55,15 +61,54 @@ func run() error {
 		defer func() { _ = store.close() }()
 	}
 
-	service := app.NewService(
-		store.procurements,
-		id.NewGenerator(),
-		nil,
-		app.WithAudit(store.audit, store.uow),
-	)
-	health := handler.NewHealth(version, map[string]handler.Check{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	checks := map[string]handler.Check{
 		"repository": store.ping,
-	})
+	}
+	serviceOptions := []app.Option{
+		app.WithAudit(store.audit, store.uow),
+	}
+
+	redisClient, err := openRedis(cfg, logger, checks)
+	if err != nil {
+		return err
+	}
+	if redisClient != nil {
+		defer func() { _ = redisClient.Close() }()
+		if cfg.Redis.CacheEnabled {
+			serviceOptions = append(serviceOptions,
+				app.WithCache(redisstore.NewCache(redisClient, "procure:"), cfg.Redis.CacheTTL),
+			)
+			logger.Info("aggregate cache enabled", slog.Duration("ttl", cfg.Redis.CacheTTL))
+		}
+	}
+
+	// The outbox exists to feed the broker. Without a broker URL the service
+	// skips event emission entirely so rows cannot accumulate forever.
+	var publisher *rabbitmq.Publisher
+	if cfg.RabbitMQ.URL != "" {
+		serviceOptions = append(serviceOptions, app.WithOutbox(store.outbox))
+
+		publisher = rabbitmq.NewPublisher(cfg.RabbitMQ.URL, cfg.RabbitMQ.Exchange)
+		defer func() { _ = publisher.Close() }()
+		checks["rabbitmq"] = publisher.Healthy
+
+		connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := publisher.Connect(connectCtx); err != nil {
+			logger.Warn("rabbitmq is not reachable; events stay queued in the outbox until it recovers",
+				slog.String("error", err.Error()))
+		}
+		cancel()
+
+		relayer := relay.New(store.outbox, publisher, logger, relay.DefaultConfig())
+		go relayer.Run(ctx)
+		logger.Info("outbox relay started", slog.String("exchange", cfg.RabbitMQ.Exchange))
+	}
+
+	service := app.NewService(store.procurements, id.NewGenerator(), nil, serviceOptions...)
+	health := handler.NewHealth(version, checks)
 
 	var authenticator auth.Authenticator
 	if cfg.Auth.Enabled {
@@ -77,14 +122,7 @@ func run() error {
 	}
 
 	registry := metrics.NewRegistry()
-	var limiter *ratelimit.Limiter
-	if cfg.RateLimit.Enabled {
-		limiter = ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
-		logger.Info("rate limiting enabled",
-			slog.Float64("requests_per_second", cfg.RateLimit.RequestsPerSecond),
-			slog.Int("burst", cfg.RateLimit.Burst),
-		)
-	}
+	limiter := newLimiter(cfg, redisClient, logger)
 
 	router := httpapi.NewRouter(httpapi.Dependencies{
 		Config:        cfg,
@@ -109,10 +147,60 @@ func run() error {
 		slog.String("version", version),
 	)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
 	return httpapi.Run(ctx, listener, server, cfg.HTTP.ShutdownTimeout, logger)
+}
+
+// openRedis creates the shared Redis client and registers its readiness check.
+// A failed first ping is not fatal: the client reconnects on demand and the
+// rate limiter falls back to its in-process bucket meanwhile.
+func openRedis(cfg config.Config, logger *slog.Logger, checks map[string]handler.Check) (*goredis.Client, error) {
+	if cfg.Redis.URL == "" {
+		return nil, nil
+	}
+
+	client, err := redisstore.NewClient(cfg.Redis.URL, cfg.Redis.DialTimeout, cfg.Redis.CommandTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("connect to redis: %w", err)
+	}
+	checks["redis"] = func(ctx context.Context) error {
+		return client.Ping(ctx).Err()
+	}
+
+	pingCtx, cancel := context.WithTimeout(context.Background(), cfg.Redis.DialTimeout)
+	defer cancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		logger.Warn("redis is not reachable; the limiter will fall back to in-process buckets until it recovers",
+			slog.String("error", err.Error()),
+		)
+	}
+	return client, nil
+}
+
+// newLimiter selects the configured limiter. Redis mode keeps a local bucket
+// as a fallback so a Redis outage degrades to per-replica limiting instead of
+// removing the limit entirely.
+func newLimiter(cfg config.Config, client *goredis.Client, logger *slog.Logger) ratelimit.Limiter {
+	if !cfg.RateLimit.Enabled {
+		return nil
+	}
+
+	local := ratelimit.New(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
+	useRedis := cfg.RateLimit.Store == config.RateLimitStoreRedis ||
+		(cfg.RateLimit.Store == config.RateLimitStoreAuto && client != nil)
+	if !useRedis || client == nil {
+		logger.Info("rate limiting enabled (in-process)",
+			slog.Float64("requests_per_second", cfg.RateLimit.RequestsPerSecond),
+			slog.Int("burst", cfg.RateLimit.Burst),
+		)
+		return local
+	}
+
+	logger.Info("rate limiting enabled (redis, with in-process fallback)",
+		slog.Float64("requests_per_second", cfg.RateLimit.RequestsPerSecond),
+		slog.Int("burst", cfg.RateLimit.Burst),
+	)
+	distributed := ratelimit.NewRedis(client, cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst)
+	return ratelimit.NewFallback(distributed, local, logger)
 }
 
 // storage bundles the adapters selected at startup.
@@ -120,6 +208,7 @@ type storage struct {
 	procurements domainproc.Repository
 	audit        audit.Repository
 	idempotency  idempotency.Repository
+	outbox       outbox.Repository
 	uow          app.UnitOfWork
 	ping         func(context.Context) error
 	close        func() error
@@ -136,6 +225,7 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 			procurements: repo,
 			audit:        memory.NewAuditRepository(),
 			idempotency:  memory.NewIdempotencyRepository(),
+			outbox:       memory.NewOutboxRepository(),
 			ping:         repo.Ping,
 		}, nil
 	}
@@ -167,6 +257,7 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 		procurements: postgres.NewProcurementRepository(db),
 		audit:        postgres.NewAuditRepository(db),
 		idempotency:  postgres.NewIdempotencyRepository(db),
+		outbox:       postgres.NewOutboxRepository(db),
 		uow:          postgres.NewUnitOfWork(db),
 		ping:         db.PingContext,
 		close:        db.Close,

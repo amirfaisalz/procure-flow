@@ -18,6 +18,30 @@ services:
       retries: 10
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
   api:
     build:
       context: ..
@@ -42,11 +66,48 @@ services:
       IDEMPOTENCY_ENABLED: "true"
       IDEMPOTENCY_TTL: "24h"
       RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_STORE: redis
       RATE_LIMIT_RPS: "20"
       RATE_LIMIT_BURST: "40"
       METRICS_ENABLED: "true"
+      # Shared state across replicas, plus a read-through aggregate cache.
+      REDIS_URL: "redis://redis:6379/0"
+      CACHE_ENABLED: "true"
+      CACHE_TTL: "30s"
+      # Lifecycle events are written to the transactional outbox and relayed
+      # to this exchange; the worker drains it.
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      RABBITMQ_EXCHANGE: "procure.events"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    image: procure-flow:local
+    entrypoint: ["/worker"]
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: info
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672/"
+      RABBITMQ_EXCHANGE: "procure.events"
+      # Optional outbound webhooks. Empty simulates delivery with a log line.
+      NOTIFICATION_WEBHOOK_URL: ""
+      ERP_WEBHOOK_URL: ""
+    depends_on:
+      rabbitmq:
         condition: service_healthy
     read_only: true
     security_opt:

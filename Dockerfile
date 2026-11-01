@@ -15,10 +15,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/api \
     ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/worker \
+    ./cmd/worker
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/api /api
+COPY --from=build /out/worker /worker
 
 USER nonroot:nonroot
 EXPOSE 8080

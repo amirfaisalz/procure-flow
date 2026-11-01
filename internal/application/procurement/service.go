@@ -8,6 +8,7 @@ import (
 
 	"github.com/amirfaisalz/procure-flow/internal/domain"
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
+	"github.com/amirfaisalz/procure-flow/internal/domain/outbox"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
 )
 
@@ -59,13 +60,36 @@ func WithAudit(repo audit.Repository, uow UnitOfWork) Option {
 	}
 }
 
+// WithOutbox attaches the transactional outbox used to publish lifecycle
+// events to the broker.
+func WithOutbox(repo outbox.Repository) Option {
+	return func(s *Service) {
+		s.outbox = repo
+	}
+}
+
+// WithCache attaches a read-through aggregate cache. A non-positive TTL falls
+// back to the default; a nil cache disables caching.
+func WithCache(cache Cache, ttl time.Duration) Option {
+	return func(s *Service) {
+		s.cache = cache
+		if ttl <= 0 {
+			ttl = defaultCacheTTL
+		}
+		s.cacheTTL = ttl
+	}
+}
+
 // Service implements procurement use cases.
 type Service struct {
-	repo  domainproc.Repository
-	audit audit.Repository
-	uow   UnitOfWork
-	ids   IDGenerator
-	now   func() time.Time
+	repo     domainproc.Repository
+	audit    audit.Repository
+	outbox   outbox.Repository
+	uow      UnitOfWork
+	cache    Cache
+	cacheTTL time.Duration
+	ids      IDGenerator
+	now      func() time.Time
 }
 
 // NewService wires the use-case service. A nil clock defaults to time.Now.
@@ -121,7 +145,10 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Pro
 			if err := s.repo.Create(ctx, p); err != nil {
 				return err
 			}
-			return s.record(ctx, actor, p, ActionCreated, "")
+			if err := s.record(ctx, actor, p, ActionCreated, ""); err != nil {
+				return err
+			}
+			return s.emit(ctx, actor, p, EventCreated, "")
 		})
 		if err == nil {
 			return p, nil
@@ -133,20 +160,40 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (domainproc.Pro
 	return domainproc.Procurement{}, err
 }
 
-// Get returns one procurement by ID.
+// Get returns one procurement by ID. Reads are served from the cache when one
+// is configured; the actor is still required on every call.
 func (s *Service) Get(ctx context.Context, id string) (domainproc.Procurement, error) {
 	if _, err := requireActor(ctx); err != nil {
 		return domainproc.Procurement{}, err
 	}
-	return s.get(ctx, id)
+	id, err := normalizeID(id)
+	if err != nil {
+		return domainproc.Procurement{}, err
+	}
+
+	if s.cache != nil {
+		var cached domainproc.Procurement
+		if ok, cacheErr := s.cache.Get(ctx, procurementCacheKey(id), &cached); cacheErr == nil && ok {
+			return cached, nil
+		}
+	}
+
+	p, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return domainproc.Procurement{}, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Set(ctx, procurementCacheKey(id), p, s.cacheTTL)
+	}
+	return p, nil
 }
 
+// get loads the aggregate directly from storage. Mutations call this inside a
+// transaction and must always observe committed state, so it bypasses the cache.
 func (s *Service) get(ctx context.Context, id string) (domainproc.Procurement, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return domainproc.Procurement{}, &domain.ValidationError{
-			Fields: map[string]string{"id": "must not be empty"},
-		}
+	id, err := normalizeID(id)
+	if err != nil {
+		return domainproc.Procurement{}, err
 	}
 	return s.repo.GetByID(ctx, id)
 }
@@ -281,13 +328,24 @@ func (s *Service) mutate(
 		if err := s.record(ctx, actor, p, action, fromStatus); err != nil {
 			return err
 		}
+		if err := s.emit(ctx, actor, p, action, fromStatus); err != nil {
+			return err
+		}
 		result = p
 		return nil
 	})
 	if err != nil {
 		return domainproc.Procurement{}, err
 	}
+	s.invalidate(ctx, result.ID)
 	return result, nil
+}
+
+func (s *Service) invalidate(ctx context.Context, id string) {
+	if s.cache == nil {
+		return
+	}
+	_ = s.cache.Delete(ctx, procurementCacheKey(id))
 }
 
 func (s *Service) withinTx(ctx context.Context, fn func(context.Context) error) error {

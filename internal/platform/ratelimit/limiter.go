@@ -1,7 +1,9 @@
-// Package ratelimit implements an in-process token-bucket limiter.
+// Package ratelimit implements per-caller token-bucket limiters. Limiting can
+// run in-process (Memory) or in Redis so limits hold across API replicas.
 package ratelimit
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -13,11 +15,17 @@ type Result struct {
 	RetryAfter time.Duration
 }
 
-// Limiter is a thread-safe token-bucket limiter keyed by caller identity.
+// Limiter admits or rejects one request for a caller key.
+type Limiter interface {
+	Allow(ctx context.Context, key string) (Result, error)
+	Burst() int
+}
+
+// Memory is a thread-safe, in-process token-bucket limiter keyed by caller.
 //
 // Each key starts with Burst tokens and refills at Rate tokens per second.
 // Idle keys are pruned so the map cannot grow without bound.
-type Limiter struct {
+type Memory struct {
 	mu      sync.Mutex
 	rate    float64
 	burst   float64
@@ -41,8 +49,8 @@ const (
 
 // New creates a limiter that admits Rate requests per second with a Burst
 // allowance. A non-positive rate or burst disables limiting.
-func New(rate float64, burst int) *Limiter {
-	return &Limiter{
+func New(rate float64, burst int) *Memory {
+	return &Memory{
 		rate:    rate,
 		burst:   float64(burst),
 		now:     time.Now,
@@ -51,7 +59,7 @@ func New(rate float64, burst int) *Limiter {
 }
 
 // Burst returns the configured burst size.
-func (l *Limiter) Burst() int {
+func (l *Memory) Burst() int {
 	if l == nil {
 		return 0
 	}
@@ -59,9 +67,9 @@ func (l *Limiter) Burst() int {
 }
 
 // Allow consumes one token for key when available.
-func (l *Limiter) Allow(key string) Result {
+func (l *Memory) Allow(_ context.Context, key string) (Result, error) {
 	if l == nil || l.rate <= 0 || l.burst <= 0 {
-		return Result{Allowed: true}
+		return Result{Allowed: true}, nil
 	}
 
 	l.mu.Lock()
@@ -90,7 +98,7 @@ func (l *Limiter) Allow(key string) Result {
 
 	if b.tokens >= 1 {
 		b.tokens--
-		return Result{Allowed: true, Remaining: int(b.tokens)}
+		return Result{Allowed: true, Remaining: int(b.tokens)}, nil
 	}
 
 	deficit := 1 - b.tokens
@@ -98,10 +106,10 @@ func (l *Limiter) Allow(key string) Result {
 	if retryAfter < time.Millisecond {
 		retryAfter = time.Millisecond
 	}
-	return Result{Allowed: false, Remaining: 0, RetryAfter: retryAfter}
+	return Result{Allowed: false, Remaining: 0, RetryAfter: retryAfter}, nil
 }
 
-func (l *Limiter) sweep(now time.Time) {
+func (l *Memory) sweep(now time.Time) {
 	for key, b := range l.buckets {
 		if now.Sub(b.seen) > idleTTL {
 			delete(l.buckets, key)
@@ -110,7 +118,7 @@ func (l *Limiter) sweep(now time.Time) {
 }
 
 // Size reports the number of tracked keys. It is intended for tests.
-func (l *Limiter) Size() int {
+func (l *Memory) Size() int {
 	if l == nil {
 		return 0
 	}

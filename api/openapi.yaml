@@ -10,6 +10,10 @@ info:
     key and body replays the original response instead of creating a duplicate.
     API routes are rate limited per caller and return `429` with `Retry-After`
     when the bucket is exhausted.
+
+    Lifecycle changes also publish asynchronous events (requester notifications
+    and ERP syncs) through a transactional outbox. Those side effects happen in
+    a separate worker and never delay the HTTP response.
 servers:
   - url: http://localhost:8080
 security:
