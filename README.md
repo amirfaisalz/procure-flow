@@ -1,387 +1,232 @@
+<div align="center">
+
 # procure-flow
 
-Enterprise procurement workflow API built on the Go standard library
-(`net/http`, Go 1.22+ routing, `log/slog`, `database/sql`). There is no
-third-party web framework; PostgreSQL is reached through the pure-Go `pgx`
-driver. Redis provides shared rate limiting and read caching, and RabbitMQ
-carries lifecycle events to an asynchronous worker.
+**Procurement approvals that behave like production — without a web framework.**
 
-## Features
+Purchase requests with an explicit approval state machine, role-based access,
+an append-only audit trail, idempotent writes, and an asynchronous event
+pipeline. HTTP, logging, and SQL come from the Go standard library;
+PostgreSQL, Redis, and RabbitMQ are used where they earn their keep.
 
-- Layered architecture: domain → application → infrastructure/transport.
-- Procurement aggregate with an explicit status state machine.
-- Optimistic concurrency via a monotonically increasing `Version`.
-- PostgreSQL persistence with embedded, reversible migrations, plus an
-  in-memory adapter for local development and tests.
-- RFC 9457 `application/problem+json` error responses.
-- Strict JSON decoding: 1 MiB limit, unknown fields rejected, `application/json` required.
-- Request correlation (`X-Request-ID`), structured access logs, panic recovery.
-- Security headers, exact-origin CORS, per-request timeout.
-- Liveness/readiness probes with pluggable dependency checks.
-- Graceful shutdown on `SIGINT`/`SIGTERM`.
-- Authentication with static API keys or HS256 JWTs (algorithm pinned).
-- Role-based access control: `admin`, `approver`, `requester`, and `viewer`,
-  with department scoping for approvers and ownership checks for requesters.
-- Append-only audit trail written in the same transaction as each change, with
-  a database trigger that rejects updates and deletes.
-- Idempotent writes via `Idempotency-Key`, scoped per actor, with replay of the
-  stored response and rejection of key reuse with a different body.
-- Per-caller token-bucket rate limiting with `Retry-After` and rate-limit
-  headers; optionally shared across replicas through Redis, with an in-process
-  fallback when Redis is unavailable.
-- Read-through Redis cache for single-procurement reads, invalidated on every
-  write and bounded by a TTL.
-- Transactional outbox + RabbitMQ topic exchange: lifecycle events are
-  published with confirms, and a worker performs requester notifications and
-  ERP syncs without blocking the HTTP response.
-- Prometheus metrics at `/metrics` and W3C Trace Context propagation.
-- Scalar API reference (OpenAPI 3.1) and an HTTP request collection.
-- CI that runs `gofmt`, `go vet`, race tests against PostgreSQL, Redis, and
-  RabbitMQ, and a build.
+[![CI](https://github.com/amirfaisalz/procure-flow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/amirfaisalz/procure-flow/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/amirfaisalz/procure-flow.svg)](https://pkg.go.dev/github.com/amirfaisalz/procure-flow)
+[![Go version](https://img.shields.io/github/go-mod/go-version/amirfaisalz/procure-flow)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Requirements
+[Quick start](#quick-start) · [Walkthrough](#walkthrough) · [API](#api) ·
+[Architecture](docs/architecture.md) · [Configuration](docs/configuration.md) ·
+[Contributing](#contributing)
 
-- Go 1.26+
-- Docker (optional, for PostgreSQL, Redis, RabbitMQ, and container images)
+</div>
+
+---
+
+Most procurement examples stop at CRUD. The hard parts start afterwards: two
+approvers acting on the same request, a client retrying a `POST` after a
+timeout, a webhook that is down, an auditor asking who changed what and when.
+`procure-flow` is a compact service that takes those problems seriously — small
+enough to read in an afternoon, complete enough to deploy.
+
+## Highlights
+
+- **Explicit lifecycle** — `draft → submitted → approved | rejected | cancelled`,
+  enforced by the aggregate rather than scattered `if` statements.
+- **Lost updates are impossible** — every write carries an expected `Version`;
+  concurrent mutations surface as `409 Conflict` instead of overwriting.
+- **Real authorization** — `admin`, `approver`, `requester`, and `viewer`, with
+  department-scoped approvals and no self-approval for non-admins.
+- **Auditable by construction** — each transition writes an immutable audit row
+  in the same transaction; a database trigger rejects `UPDATE` and `DELETE`.
+- **Retry-safe by default** — `Idempotency-Key` replay scoped per actor, RFC 9457
+  problem documents, and a strict 1 MiB JSON decoder.
+- **Backpressure built in** — token-bucket rate limiting per caller, shared
+  across replicas through Redis, with anonymous traffic throttled too.
+- **Async side effects** — a transactional outbox plus RabbitMQ consumers for
+  notifications and ERP sync, so HTTP latency never depends on a webhook.
+- **Boring operations** — liveness/readiness with a degraded state, Prometheus
+  metrics, graceful shutdown, embedded reversible migrations.
+
+## Table of contents
+
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Walkthrough](#walkthrough)
+- [Running locally](#running-locally)
+- [API](#api)
+- [Authentication and roles](#authentication-and-roles)
+- [Configuration](#configuration)
+- [Reliability and delivery semantics](#reliability-and-delivery-semantics)
+- [Operations](#operations)
+- [Development](#development)
+- [Project layout](#project-layout)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Architecture
+
+```
+cmd/api · cmd/worker · cmd/migrate
+        │
+        ▼
+transport/httpapi ─────── router, middleware, RFC 9457 responses
+        │
+        ▼
+application ───────────── use cases, authorization, cache, event emission
+        │
+        ▼
+domain ────────────────── aggregate, state machine, repository ports
+        ▲
+        │
+infrastructure ────────── memory · postgres · redis · rabbitmq
+```
+
+Dependencies point inward. The domain layer imports only the standard library,
+so business rules run without a database; the application layer depends on
+interfaces, never on an adapter; infrastructure implements those interfaces.
+The same repository contract suite runs against the in-memory and PostgreSQL
+adapters, which is why the fast tests are meaningful.
+
+A full tour — aggregates, transaction boundaries, outbox relay, failure modes —
+is in [`docs/architecture.md`](docs/architecture.md).
 
 ## Quick start
 
-### In-memory (fastest)
+The fastest path runs the complete stack (API, PostgreSQL, Redis, RabbitMQ, and
+the worker) in containers:
 
 ```bash
-make run
+git clone https://github.com/amirfaisalz/procure-flow.git
+cd procure-flow
+docker compose -f deployments/docker-compose.yml up --build
 ```
 
-The API listens on `:8080` by default and stores data in memory. Data is lost
-when the process exits, and `APP_ENV=production` refuses to start without a
-database.
+| Service | Address |
+| --- | --- |
+| API | <http://localhost:8080> |
+| Interactive API reference | <http://localhost:8080/docs> |
+| RabbitMQ management | <http://localhost:15672> (`guest` / `guest`) |
+| PostgreSQL | `127.0.0.1:55432` (`procure` / `procure`) |
+| Redis | `127.0.0.1:56379` |
+
+Compose turns authentication on and seeds two **local-only** tokens: an admin
+(`local-admin-token-0123456789`) and an Engineering approver
+(`local-approver-token-0123456789`). Replace them before exposing the stack to
+anything.
+
+## Walkthrough
+
+The lifecycle is deliberately small:
+
+```
+draft ──submit──▶ submitted ──approve──▶ approved
+  │                   │
+  │                   └──reject──▶ rejected
+  └──cancel───────────┴──cancel──▶ cancelled
+```
+
+Create a draft, submit it, approve it, then read it back:
 
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/procurements \
+export API=http://localhost:8080
+export TOKEN=local-admin-token-0123456789
+
+ID=$(curl -s -X POST "$API/api/v1/procurements" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-create-1' \
   -d '{
     "title": "Laptop procurement for engineering",
-    "description": "20 units of development laptops",
+    "description": "20 development laptops",
     "department": "Engineering",
     "requester": "Amir",
     "amount": 250000000,
     "currency": "IDR"
-  }'
+  }' | jq -r '.data.id')
 
-curl -s http://localhost:8080/api/v1/procurements
-curl -s -X POST http://localhost:8080/api/v1/procurements/<id>/submit
-curl -s -X POST http://localhost:8080/api/v1/procurements/<id>/approve
-curl -s http://localhost:8080/healthz
-curl -s http://localhost:8080/readyz
+curl -s -X POST "$API/api/v1/procurements/$ID/submit"  -H "Authorization: Bearer $TOKEN"
+curl -s -X POST "$API/api/v1/procurements/$ID/approve" -H "Authorization: Bearer $TOKEN"
+curl -s "$API/api/v1/procurements/$ID" -H "Authorization: Bearer $TOKEN" | jq
 ```
 
-`/readyz` returns 503 only when a required dependency (the database) fails.
-Redis and RabbitMQ are reported in `checks`; when one is unavailable the status
-is `degraded` but the instance keeps receiving traffic.
-
-### PostgreSQL
+Without `jq`, copy `data.id` from the create response. Listing, filters, and the
+audit trail work the same way:
 
 ```bash
-make db-up          # PostgreSQL 18 on 127.0.0.1:55432
-cp .env.example .env
-# uncomment DATABASE_URL in .env
-set -a && . ./.env && set +a
-make run            # migrations run automatically on startup
+curl -s "$API/api/v1/procurements?status=approved&page=1&page_size=20" \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -s "$API/api/v1/procurements/$ID/audit" -H "Authorization: Bearer $TOKEN"
 ```
 
-The compose stack (`make db-up` then `docker compose -f deployments/docker-compose.yml up api`)
-runs the API and database together.
+The audit trail is the interesting part: every state change is recorded newest
+first, with the actor, the transition, and the resulting version.
 
-### Redis and RabbitMQ (asynchronous stack)
+Prefer clicking to curling? Open <http://localhost:8080/docs> for a Scalar
+reference with an in-browser request client.
 
-Redis and RabbitMQ are optional. Start them locally and point the API at them:
+## Running locally
+
+No containers needed for the in-memory mode:
 
 ```bash
-make deps-up        # PostgreSQL :55432, Redis :56379, RabbitMQ :5672
-export REDIS_URL=redis://127.0.0.1:56379/0
-export RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
-export RATE_LIMIT_STORE=redis
 make run
-make worker         # in a second terminal
+```
+
+Data lives in memory and disappears with the process. `APP_ENV=production`
+refuses to start without `DATABASE_URL`, so a misconfigured deploy fails loudly
+instead of silently losing writes.
+
+For the full stack on the host:
+
+```bash
+make deps-up            # PostgreSQL :55432 · Redis :56379 · RabbitMQ :5672
+
+export DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'
+export REDIS_URL='redis://127.0.0.1:56379/0'
+export RABBITMQ_URL='amqp://guest:guest@127.0.0.1:5672/'
+export RATE_LIMIT_STORE=redis
+
+make run                # applies embedded migrations on startup
+make worker             # in a second terminal
 ```
 
 The worker logs one notification per lifecycle event and simulates the ERP sync
-unless webhooks are configured. To run the whole stack in containers, including
-the worker:
+unless webhooks are configured. Migrations can also run as a separate step:
 
 ```bash
-docker compose -f deployments/docker-compose.yml up --build
-```
-
-## Configuration
-
-Configuration is read from environment variables. See
-[`.env.example`](.env.example) and [`configs/config.example.env`](configs/config.example.env).
-
-```bash
-cp .env.example .env
-set -a && . ./.env && set +a
-make run
-```
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `APP_ENV` | `development` | `development`, `staging`, or `production` |
-| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `HTTP_ADDR` | `:8080` | Listen address |
-| `HTTP_READ_HEADER_TIMEOUT` | `5s` | Header read timeout |
-| `HTTP_READ_TIMEOUT` | `15s` | Full request read timeout |
-| `HTTP_WRITE_TIMEOUT` | `30s` | Response write timeout |
-| `HTTP_IDLE_TIMEOUT` | `60s` | Keep-alive idle timeout |
-| `HTTP_REQUEST_TIMEOUT` | `20s` | Per-request context deadline |
-| `HTTP_SHUTDOWN_TIMEOUT` | `15s` | Graceful shutdown budget |
-| `HTTP_MAX_HEADER_BYTES` | `1048576` | Maximum request header size |
-| `DATABASE_URL` | *(empty)* | PostgreSQL URL; empty selects memory. Required in production |
-| `DB_MAX_OPEN_CONNS` | `25` | Maximum open connections |
-| `DB_MAX_IDLE_CONNS` | `25` | Maximum idle connections |
-| `DB_CONN_MAX_LIFETIME` | `30m` | Connection maximum lifetime |
-| `DB_CONN_MAX_IDLE_TIME` | `5m` | Connection maximum idle time |
-| `DB_AUTO_MIGRATE` | `true` | Apply embedded migrations on startup |
-| `CORS_ALLOWED_ORIGINS` | *(empty)* | Comma-separated exact origins |
-| `AUTH_ENABLED` | `true` in staging/production, `false` in development | Require authentication |
-| `AUTH_API_KEYS` | *(empty)* | JSON array of static API keys |
-| `AUTH_JWT_SECRET` | *(empty)* | HS256 secret, at least 32 characters |
-| `AUTH_JWT_ISSUER` | `procure-flow` | Required JWT `iss` |
-| `AUTH_JWT_AUDIENCE` | `procure-flow-api` | Required JWT `aud` |
-| `AUTH_JWT_LEEWAY` | `30s` | Clock-skew tolerance |
-| `IDEMPOTENCY_ENABLED` | `true` | Replay protection for write endpoints |
-| `IDEMPOTENCY_TTL` | `24h` | How long stored responses remain replayable |
-| `RATE_LIMIT_ENABLED` | `true` in staging/production, `false` in development | Enable per-caller limiting |
-| `RATE_LIMIT_RPS` | `20` | Sustained requests per second per caller |
-| `RATE_LIMIT_BURST` | `40` | Burst allowance per caller |
-| `METRICS_ENABLED` | `true` | Serve Prometheus metrics at `/metrics` |
-| `REDIS_URL` | *(empty)* | `redis://` or `rediss://` URL; enables shared state |
-| `REDIS_DIAL_TIMEOUT` | `2s` | Redis connect and pool timeout |
-| `REDIS_COMMAND_TIMEOUT` | `1s` | Redis read/write command timeout |
-| `CACHE_ENABLED` | `true` when `REDIS_URL` is set | Read-through cache for GET by id |
-| `CACHE_TTL` | `30s` | Maximum staleness bound for cached aggregates |
-| `RATE_LIMIT_STORE` | `auto` | `auto`, `memory`, or `redis`; redis requires `REDIS_URL` |
-| `RABBITMQ_URL` | *(empty)* | `amqp://` or `amqps://` URL; enables async events |
-| `RABBITMQ_EXCHANGE` | `procure.events` | Durable topic exchange for lifecycle events |
-| `NOTIFICATION_WEBHOOK_URL` | *(empty)* | Worker POSTs requester notifications here |
-| `ERP_WEBHOOK_URL` | *(empty)* | Worker POSTs approved procurements here |
-| `DOCS_ENABLED` | `true` (non-production) | Serve `/docs` and `/openapi.yaml` |
-
-`HTTP_REQUEST_TIMEOUT` must not exceed `HTTP_WRITE_TIMEOUT`. Wildcard CORS
-origins are rejected. `DB_MAX_IDLE_CONNS` must not exceed `DB_MAX_OPEN_CONNS`.
-Production requires `DATABASE_URL`, `AUTH_ENABLED=true`, and at least one of
-`AUTH_API_KEYS` or `AUTH_JWT_SECRET`. `RATE_LIMIT_STORE=redis` requires
-`REDIS_URL`, and webhook URLs must use HTTP or HTTPS.
-
-## Authentication and authorization
-
-`/healthz`, `/readyz`, `/metrics`, `/docs`, and `/openapi.yaml` are public. Every
-`/api/v1` route requires `Authorization: Bearer <token>`. A static API key or an
-HS256 JWT is accepted. JWTs must carry `sub`, `exp`, a valid `roles` claim, and
-match the configured issuer and audience.
-
-```bash
-export AUTH_ENABLED=true
-export AUTH_API_KEYS='[{"token":"local-admin-token-0123456789","subject":"user_admin","name":"Local Admin","roles":["admin"]}]'
-make run
-
-curl -s http://localhost:8080/api/v1/procurements \
-  -H 'Authorization: Bearer local-admin-token-0123456789'
-```
-
-| Role | Permissions |
-| --- | --- |
-| `admin` | Everything, including cross-department approval and ownership overrides |
-| `approver` | Approve or reject submitted requests in the actor's department, but never their own |
-| `requester` | Create requests; submit and cancel requests they own |
-| `viewer` | Read requests and audit trails |
-
-Ownership is recorded as `requester_id`, derived from the token subject rather
-than the request body. Approvers cannot approve their own requests unless they
-also hold the `admin` role. Authorization fails closed: a missing actor is
-treated as forbidden. When `AUTH_ENABLED=false`, the router injects a local
-admin actor so development keeps working without credentials.
-
-### Audit trail
-
-Every create, submit, approve, reject, and cancel writes an immutable event.
-On PostgreSQL the aggregate and the audit row share one transaction, so a
-failed audit write rolls back the change. Read the trail with:
-
-```bash
-curl -s 'http://localhost:8080/api/v1/procurements/<id>/audit?page=1&page_size=20' \
-  -H 'Authorization: Bearer local-admin-token-0123456789'
-```
-
-Events are returned newest first with `meta.page`, `meta.page_size`,
-`meta.total`, and `meta.total_pages`.
-
-### Idempotency
-
-`POST /api/v1/procurements` accepts an `Idempotency-Key` header. Keys are scoped
-per authenticated actor and stored for `IDEMPOTENCY_TTL`. A retry with the same
-key and body replays the original status, body, and `Location` header, marked
-with `Idempotent-Replayed: true`. Reusing a key with a different body returns
-`422 IDEMPOTENCY_KEY_REUSED`; a concurrent retry while the first request is
-still running returns `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After: 1`.
-Responses with a 5xx status release the claim so the client can retry.
-
-```bash
-curl -s -X POST http://localhost:8080/api/v1/procurements \
-  -H 'Authorization: Bearer local-admin-token-0123456789' \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: 5b1c2a7e-create-1' \
-  -d '{"title":"Laptop procurement","department":"Engineering","amount":250000000,"currency":"IDR"}'
-```
-
-### Rate limiting
-
-Every `/api/v1` route is limited per caller. Authenticated requests consume the
-subject's bucket; failed authentication consumes the remote IP's bucket before
-the 401 is written, so credential guessing is throttled too. The token bucket
-allows `RATE_LIMIT_BURST` immediate requests and refills at `RATE_LIMIT_RPS`.
-Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`; an exhausted
-bucket returns `429 RATE_LIMITED` with `Retry-After` in seconds.
-
-With `RATE_LIMIT_STORE=redis` (or `auto` plus `REDIS_URL`) the bucket lives in
-Redis and is updated by an atomic Lua script, so all API replicas share one
-limit. If Redis fails, the middleware falls back to a per-process bucket and
-keeps serving traffic; if both backends fail, requests are allowed and the
-failure is logged.
-
-### Caching
-
-`GET /api/v1/procurements/{id}` uses cache-aside: a miss loads the aggregate
-from PostgreSQL and stores it as JSON in Redis for `CACHE_TTL`; create, submit,
-approve, reject, and cancel invalidate the key after the transaction commits.
-Every entry carries a generation marker: invalidation advances it, and a read
-that observed the old generation cannot repopulate the cache with a stale
-aggregate. Cache errors are treated as misses and never fail a request.
-
-Keys are versioned (`procurement:v1:<id>`) so an incompatible aggregate change
-can be rolled out by bumping the prefix. List results are not cached because
-filter and pagination combinations would explode the key space.
-
-### Metrics and tracing
-
-`GET /metrics` exposes Prometheus text format:
-
-- `http_requests_total{method,route,status}`
-- `http_request_duration_seconds{method,route,status}` histogram
-
-The route label is the `ServeMux` pattern (for example
-`GET /api/v1/procurements/{id}`), so identifiers never inflate cardinality.
-The endpoint is public like the probes; restrict it at the network edge.
-
-Requests accept and emit W3C `traceparent`; `X-Trace-ID` echoes the trace
-identifier. Access logs include `trace_id` and `span_id`. Exporting spans to an
-OpenTelemetry backend is on the roadmap.
-
-### Asynchronous events (RabbitMQ)
-
-When `RABBITMQ_URL` is set, every lifecycle change writes an outbox row in the
-same transaction as the aggregate update and audit event. A relay inside the API
-leases due rows (`FOR UPDATE SKIP LOCKED`), publishes the event envelope to the
-topic exchange in confirm mode, and marks the row published. Failures back off
-from 1s to 5m and are retried; a crash after publish but before the mark causes
-a duplicate, so delivery is at-least-once. Without a broker URL, no outbox rows
-are written at all.
-
-Routing keys are the event types (`procurement.created`, `submitted`,
-`approved`, `rejected`, `cancelled`). `cmd/worker` declares two durable queues:
-
-- `procure.notifications` binds every lifecycle key and notifies the requester.
-- `procure.integrations` binds `procurement.approved` and syncs with the ERP.
-
-Handlers retry three times with exponential backoff and are then dead-lettered
-to `<queue>.dlq` through `<queue>.dlx`. Notification and ERP payloads include
-the `event_id`, so external systems can deduplicate redeliveries. When a webhook
-is not configured the worker logs the action, which keeps the flow runnable
-locally. Run it with `make worker` (or the `worker` compose service):
-
-```bash
-RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/ \
-NOTIFICATION_WEBHOOK_URL=https://hooks.example.com/notify \
-ERP_WEBHOOK_URL=https://erp.example.com/procurements \
-make worker
-```
-
-The event envelope is `{id, type, aggregate_type, aggregate_id, actor_id,
-occurred_at, payload}`; the payload carries a procurement snapshot (`number`,
-`title`, `department`, `requester`, `amount`, `currency`, `status`,
-`from_status`, `version`, `actor`).
-
-## Database and migrations
-
-Migrations live in [`migrations/`](migrations) as reversible `.up.sql` /
-`.down.sql` pairs and are embedded into the binary. The runner takes a
-PostgreSQL advisory lock, records applied versions in `schema_migrations`, and
-applies each migration in its own transaction.
-
-```bash
-make migrate-up      DATABASE_URL='postgres://...'   # apply pending
-make migrate-status  DATABASE_URL='postgres://...'   # show applied/pending
-go run ./cmd/migrate down                            # roll back the last one
-```
-
-Set `DB_AUTO_MIGRATE=false` when migrations are applied by a deployment step
-instead of application startup. The container image ships the same runner as
-`/migrate`, so a deployment job can run `/migrate up` against the database.
-
-## Development
-
-```bash
-make test              # go test ./... (integration tests skip without services)
-make test-race         # go test -race ./...
-make test-integration  # race tests against PostgreSQL, Redis, and RabbitMQ
-make deps-up           # start PostgreSQL, Redis, and RabbitMQ
-make db-up             # start only PostgreSQL
-make db-reset          # destroy the database volume and recreate
-make worker            # run the async worker (needs RABBITMQ_URL)
-make cover             # coverage report
-make vet               # go vet ./...
-make fmt               # gofmt -w
-make build             # binary in bin/
-```
-
-Tests are written first (TDD) and live next to the code they exercise. The
-shared repository contract in `internal/infrastructure/repositorytest` runs
-against both the in-memory and PostgreSQL adapters.
-
-## Project layout
-
-```
-cmd/api/                       application entrypoint
-cmd/worker/                    async notification and ERP worker
-cmd/migrate/                   migration CLI (up, down, status)
-internal/config/               environment configuration
-internal/domain/               shared domain errors
-internal/domain/procurement/   aggregate, state machine, repository port
-internal/domain/event/         event envelope
-internal/domain/outbox/        transactional outbox port
-internal/application/          use-case services, cache port, event emission
-internal/infrastructure/       memory + PostgreSQL + Redis + RabbitMQ adapters
-internal/platform/             request IDs, ID generator, logging, rate limiting,
-                               metrics, tracing, outbox relay
-internal/transport/httpapi/    router, handlers, middleware, response helpers
-api/                           OpenAPI contract + HTTP request collection
-configs/                       example configuration
-deployments/                   container/deployment assets
-docs/                          architecture notes
-migrations/                    embedded, reversible SQL migrations
-scripts/                       operational scripts
+make migrate-up     DATABASE_URL='postgres://...'
+make migrate-status DATABASE_URL='postgres://...'
+go run ./cmd/migrate down
 ```
 
 ## API
 
-The contract lives in [`api/openapi.yaml`](api/openapi.yaml). All success
-responses use an envelope:
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/healthz` | Liveness |
+| `GET` | `/readyz` | Readiness; `200` with `degraded` when an optional dependency is down |
+| `GET` | `/metrics` | Prometheus text format |
+| `GET` | `/docs` | Scalar API reference |
+| `GET` | `/openapi.yaml` | OpenAPI 3.1 contract |
+| `POST` | `/api/v1/procurements` | Create a draft; accepts `Idempotency-Key` |
+| `GET` | `/api/v1/procurements` | List and filter (`q`, `status`, `page`, `page_size`) |
+| `GET` | `/api/v1/procurements/{id}` | Read one aggregate (cached) |
+| `GET` | `/api/v1/procurements/{id}/audit` | Audit trail, newest first |
+| `POST` | `/api/v1/procurements/{id}/submit` | `draft → submitted` |
+| `POST` | `/api/v1/procurements/{id}/approve` | `submitted → approved` |
+| `POST` | `/api/v1/procurements/{id}/reject` | `submitted → rejected`; requires a reason (3–500 chars) |
+| `POST` | `/api/v1/procurements/{id}/cancel` | `draft` or `submitted → cancelled` |
+
+Successful responses use a small envelope:
 
 ```json
 { "data": { }, "meta": { } }
 ```
 
-All errors use RFC 9457:
+Lists add `meta.page`, `meta.page_size`, `meta.total`, and `meta.total_pages`;
+`page_size` is capped at 100. Errors are RFC 9457 problem documents:
 
 ```json
 {
@@ -391,47 +236,159 @@ All errors use RFC 9457:
   "detail": "one or more fields are invalid",
   "instance": "/api/v1/procurements",
   "code": "VALIDATION_ERROR",
-  "request_id": "…",
+  "request_id": "01J…",
   "errors": { "title": "must be between 3 and 200 characters" }
 }
 ```
 
-### Interactive API reference (Scalar)
+The whole contract lives in [`api/openapi.yaml`](api/openapi.yaml). It also
+imports into Bruno, Postman, Insomnia, Hoppscotch, or `openapi-generator`.
+[`api/requests.http`](api/requests.http) has the happy paths, the full workflow,
+and negative cases for VS Code REST Client or JetBrains HTTP Client.
 
-Open <http://localhost:8080/docs> after `make run`. The server embeds the
-OpenAPI 3.1 document and serves a [Scalar](https://scalar.com) API reference —
-the modern successor to Swagger UI. It supports dark mode, code samples in
-multiple languages, and an in-browser request client so you can exercise every
-endpoint without installing anything.
+## Authentication and roles
 
-- `/docs` — interactive reference with a built-in request client
-- `/openapi.yaml` — raw contract (also importable into Bruno, Postman,
-  Hoppscotch, Insomnia, or `openapi-generator`)
-- Disable in production with `DOCS_ENABLED=false` (the default there).
+`/healthz`, `/readyz`, `/metrics`, `/docs`, and `/openapi.yaml` are public.
+Every `/api/v1` route needs a bearer credential — either a static API key or an
+HS256 JWT with a pinned algorithm, valid `exp`/`nbf`, and matching issuer and
+audience.
 
-### Testing the API
+```bash
+curl -s http://localhost:8080/api/v1/procurements \
+  -H 'Authorization: Bearer local-admin-token-0123456789'
+```
 
-| Tool | How |
+| Role | Permissions |
 | --- | --- |
-| Scalar | `make run`, then <http://localhost:8080/docs> → “Test Request” |
-| HTTP file | Open [`api/requests.http`](api/requests.http) in VS Code (REST Client) or JetBrains |
-| Smoke script | `make smoke` (or `BASE_URL=… make smoke`) |
-| Go tests | `make test-integration` — end-to-end `httptest` plus PostgreSQL contract tests |
-| curl | `curl -s localhost:8080/api/v1/procurements` |
+| `admin` | Everything, including cross-department approval and ownership overrides |
+| `approver` | Approve or reject submitted requests in their own department, never their own |
+| `requester` | Create requests; submit and cancel the ones they own |
+| `viewer` | Read requests and audit trails |
 
-`api/requests.http` includes happy paths, the full workflow, and negative cases
-(400 invalid JSON, 404, 405, 415, 422).
+Ownership is recorded as `requester_id`, derived from the token subject rather
+than the request body. Non-admin approvers cannot approve their own requests;
+admins may, as an explicit override. Authorization fails closed: a missing actor
+is forbidden, and a missing authenticator rejects every API call. With
+`AUTH_ENABLED=false` the router injects a local admin actor so development keeps
+working without credentials — never use that mode in production.
 
-## Status workflow
+### Idempotency
 
+`POST /api/v1/procurements` accepts an `Idempotency-Key`. Keys are scoped per
+actor and retained for `IDEMPOTENCY_TTL` (24h by default):
+
+- same key and body → replays the original status, body, and `Location`, with
+  `Idempotent-Replayed: true`;
+- same key, different body → `422 IDEMPOTENCY_KEY_REUSED`;
+- retry while the first request is still running → `409 IDEMPOTENCY_IN_PROGRESS`
+  with `Retry-After: 1`.
+
+`5xx` responses release the claim so the client can retry, and request bodies
+are capped at 1 MiB (`413` beyond that).
+
+### Rate limiting
+
+Authenticated requests consume a bucket keyed by subject; failed authentication
+consumes the remote IP's bucket **before** the `401` is written, so credential
+guessing is throttled as well. Responses carry `X-RateLimit-Limit` and
+`X-RateLimit-Remaining`; an exhausted bucket returns `429 RATE_LIMITED` with
+`Retry-After`.
+
+With `RATE_LIMIT_STORE=redis` the bucket lives in Redis behind an atomic Lua
+script, so every replica shares one limit. If Redis fails the middleware falls
+back to a per-process bucket; if both fail, requests are allowed and the failure
+is logged — availability wins over strictness here, deliberately.
+
+## Configuration
+
+Environment variables only; `.env` is not read automatically. The essentials:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `APP_ENV` | `development` | `production` turns on strict preconditions |
+| `HTTP_ADDR` | `:8080` | Listen address |
+| `DATABASE_URL` | *(empty)* | Empty selects the in-memory repository |
+| `AUTH_ENABLED` | platform-dependent | `true` in staging/production |
+| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | One of them is required in production |
+| `CORS_ALLOWED_ORIGINS` | *(empty)* | Exact origins only; wildcards rejected |
+| `REDIS_URL` | *(empty)* | Enables shared rate limiting and the read cache |
+| `RABBITMQ_URL` | *(empty)* | Enables the outbox relay and lifecycle events |
+| `METRICS_ENABLED` | `true` | Prometheus endpoint |
+| `DOCS_ENABLED` | `true` outside production | `/docs` and `/openapi.yaml` |
+
+Every key, its default, and the validation rules are documented in
+[`docs/configuration.md`](docs/configuration.md) and
+[`.env.example`](.env.example).
+
+## Reliability and delivery semantics
+
+**Reads** — `GET /api/v1/procurements/{id}` is cache-aside. A miss loads the
+aggregate, stores it as JSON in Redis for `CACHE_TTL`, and every write
+invalidates the key after commit. Each entry carries a generation marker: a read
+that observed the old generation cannot repopulate a stale value, and cache
+errors are treated as misses, never as failures. Keys are versioned
+(`procurement:v1:<id>`); lists are not cached.
+
+**Writes** — aggregate changes, audit rows, and outbox rows share one
+transaction. A failed audit write rolls the change back. Under contention the
+optimistic version check decides the winner and the loser gets `409`.
+
+**Events** — when `RABBITMQ_URL` is set, a relay leases due outbox rows with
+`FOR UPDATE SKIP LOCKED`, publishes to a durable topic exchange in confirm mode,
+and marks them published. Failures back off from 1s to 5m. A crash between
+publish and mark produces a duplicate, so delivery is **at-least-once** — the
+`event_id` in every payload is the deduplication handle for consumers.
+
+**Consumers** — `cmd/worker` declares two durable queues. `procure.notifications`
+binds every lifecycle key and notifies the requester; `procure.integrations`
+binds `procurement.approved` and syncs with the ERP. Handlers retry three times
+with exponential backoff, then dead-letter to `<queue>.dlq` through
+`<queue>.dlx`. Routing keys are the event types (`procurement.created`,
+`submitted`, `approved`, `rejected`, `cancelled`).
+
+The envelope is `{id, type, aggregate_type, aggregate_id, actor_id,
+occurred_at, payload}`; the payload carries a procurement snapshot (`number`,
+`title`, `department`, `requester`, `amount`, `currency`, `status`,
+`from_status`, `version`, `actor`).
+
+## Operations
+
+### Health
+
+`/healthz` answers liveness. `/readyz` gates on required dependencies only —
+today PostgreSQL:
+
+```json
+{ "status": "degraded", "checks": { "repository": "ok", "redis": "unavailable" } }
 ```
-draft ──submit──▶ submitted ──approve──▶ approved
-  │                   │
-  │                   └──reject──▶ rejected
-  └──cancel───────────┴──cancel──▶ cancelled
-```
 
-## Container
+A Redis or RabbitMQ outage returns `200 degraded` and the instance keeps taking
+traffic, because both features have local fallbacks. Only a failing required
+dependency returns `503 not_ready`.
+
+### Metrics and tracing
+
+- `http_requests_total{method,route,status}`
+- `http_request_duration_seconds{method,route,status}`
+
+The `route` label is the `ServeMux` pattern, not the raw path, so identifiers
+never inflate cardinality. `/metrics` is public like the probes — restrict it at
+the network edge.
+
+Every response carries `X-Request-ID`: a valid incoming value is preserved,
+otherwise one is generated, and the access log correlates on it. Requests accept
+and emit W3C `traceparent`; `X-Trace-ID` and the access logs carry `trace_id` and
+`span_id`. Exporting spans to an OpenTelemetry backend is on the
+[roadmap](#roadmap).
+
+### Shutdown
+
+The API stops accepting connections on `SIGINT`/`SIGTERM`, drains in-flight
+requests within `HTTP_SHUTDOWN_TIMEOUT`, and joins the outbox relay before
+closing the publisher, Redis client, and pool. The worker stops consuming and
+leaves in-flight deliveries unsettled so the broker can requeue them.
+
+### Container
 
 ```bash
 make docker-build
@@ -443,17 +400,86 @@ docker run --rm -p 8080:8080 \
   procure-flow:local
 ```
 
-The image contains both binaries: `/api` is the default entrypoint and
-`/worker` runs the asynchronous consumers. Or run the full stack, including
-Redis, RabbitMQ, and the worker:
+The image ships three binaries: `/api` (default entrypoint), `/worker`, and
+`/migrate` for deployment jobs. Compose runs it read-only with
+`no-new-privileges` and a 30s grace period.
+
+## Development
+
+Go 1.26 or newer. Docker is optional, but the integration tests need the
+compose services.
 
 ```bash
-docker compose -f deployments/docker-compose.yml up --build
+make help              # every target, documented
+make test              # unit tests; integration tests skip without services
+make test-race         # same tests with the race detector
+make test-integration  # race tests against PostgreSQL, Redis, and RabbitMQ
+make check             # go fmt + vet + integration tests
+make cover             # coverage summary
+```
+
+| Target | What it does |
+| --- | --- |
+| `make run` | Run the API |
+| `make worker` | Run the async worker |
+| `make deps-up` / `make db-up` | Start dependencies |
+| `make db-reset` | Destroy and recreate the database volume |
+| `make migrate-up` / `make migrate-status` | Migration CLI wrappers |
+| `make smoke` | Smoke-test a running instance (`BASE_URL=…`) |
+| `make build` | Binary in `bin/` |
+
+Tests live next to the code they exercise. The shared repository contract in
+`internal/infrastructure/repositorytest` runs against both adapters, so the
+in-memory implementation and PostgreSQL cannot drift apart silently. Integration
+tests are gated by `TEST_DATABASE_URL`, `TEST_REDIS_URL`, and
+`TEST_RABBITMQ_URL`.
+
+CI runs `gofmt`, `go mod tidy -diff`, `go vet`, `go test -race` with PostgreSQL,
+Redis, and RabbitMQ services, a build, and a container build.
+
+## Project layout
+
+```
+cmd/api/                       HTTP entrypoint and outbox relay
+cmd/worker/                    async notification and ERP consumers
+cmd/migrate/                   migration CLI (up, down, status)
+internal/config/               environment configuration
+internal/domain/               domain errors, procurement aggregate, ports
+internal/application/          use cases, cache port, event emission
+internal/infrastructure/       memory · postgres · redis · rabbitmq adapters
+internal/platform/             IDs, logging, auth, rate limiting, metrics,
+                               tracing, outbox relay
+internal/transport/httpapi/    router, handlers, middleware, RFC 9457 helpers
+api/                           OpenAPI contract and HTTP request collection
+configs/                       example configuration
+deployments/                   compose stack
+docs/                          architecture and configuration references
+migrations/                    embedded, reversible SQL migrations
+scripts/                       operational scripts
 ```
 
 ## Roadmap
 
 - OIDC discovery and key rotation for JWT verification.
-- OpenTelemetry span export (trace context propagation already exists).
-- Kubernetes manifests, broker-level dead-letter replay tooling, backup and
-  retention policy, and load/fuzz tests.
+- OpenTelemetry span export (propagation already exists).
+- Kubernetes manifests, dead-letter replay tooling, and backup/retention policy.
+- Load and fuzz tests around the state machine and the middleware chain.
+
+## Contributing
+
+Issues and pull requests are welcome. For a change to land smoothly:
+
+1. Fork the repository and branch from `main`.
+2. Keep `gofmt`, `go vet`, and `go test -race ./...` green; `make check` runs the
+   full set against the compose services.
+3. Add a test for every behaviour change. Bug fixes should start with one that
+   fails.
+4. Keep pull requests focused — one concern per PR, with a short explanation of
+   the tradeoff rather than a changelog.
+
+Found a security problem? Please use GitHub's private vulnerability reporting
+instead of opening a public issue.
+
+## License
+
+Released under the [MIT License](LICENSE). Use it, fork it, ship it.
