@@ -165,3 +165,102 @@ func TestLoadAuthInvalid(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAuthSessionDefaults(t *testing.T) {
+	cfg, err := config.LoadFrom(env(nil))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if cfg.Auth.SessionTTL != 8*time.Hour {
+		t.Errorf("SessionTTL = %v, want 8h", cfg.Auth.SessionTTL)
+	}
+	if cfg.Auth.CookieName != "procure_session" {
+		t.Errorf("CookieName = %q, want procure_session", cfg.Auth.CookieName)
+	}
+	if cfg.Auth.CookieSecure {
+		t.Error("CookieSecure = true in development, want false")
+	}
+}
+
+func TestLoadAuthSessionOverrides(t *testing.T) {
+	cfg, err := config.LoadFrom(env(map[string]string{
+		"APP_ENV":            "staging",
+		"AUTH_API_KEYS":      testAPIKeys,
+		"AUTH_SESSION_TTL":   "2h",
+		"AUTH_COOKIE_NAME":   "session",
+		"AUTH_COOKIE_SECURE": "false",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+
+	if cfg.Auth.SessionTTL != 2*time.Hour {
+		t.Errorf("SessionTTL = %v, want 2h", cfg.Auth.SessionTTL)
+	}
+	if cfg.Auth.CookieName != "session" {
+		t.Errorf("CookieName = %q, want session", cfg.Auth.CookieName)
+	}
+	if cfg.Auth.CookieSecure {
+		t.Error("CookieSecure = true, want the explicit false override")
+	}
+}
+
+func TestLoadAuthCookieSecureDefaultsOnOutsideDevelopment(t *testing.T) {
+	cfg, err := config.LoadFrom(env(map[string]string{
+		"APP_ENV":       "staging",
+		"AUTH_API_KEYS": testAPIKeys,
+	}))
+	if err != nil {
+		t.Fatalf("LoadFrom() error = %v", err)
+	}
+	if !cfg.Auth.CookieSecure {
+		t.Error("CookieSecure = false in staging, want true")
+	}
+}
+
+func TestLoadAuthSessionValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "zero ttl",
+			env: map[string]string{
+				"AUTH_ENABLED":     "true",
+				"AUTH_API_KEYS":    testAPIKeys,
+				"AUTH_SESSION_TTL": "0s",
+			},
+			want: "AUTH_SESSION_TTL",
+		},
+		{
+			name: "ttl too long",
+			env: map[string]string{
+				"AUTH_ENABLED":     "true",
+				"AUTH_API_KEYS":    testAPIKeys,
+				"AUTH_SESSION_TTL": "1000h",
+			},
+			want: "AUTH_SESSION_TTL",
+		},
+		{
+			name: "invalid cookie name",
+			env: map[string]string{
+				"AUTH_ENABLED":     "true",
+				"AUTH_API_KEYS":    testAPIKeys,
+				"AUTH_COOKIE_NAME": "bad name",
+			},
+			want: "AUTH_COOKIE_NAME",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := config.LoadFrom(env(test.env))
+			if err == nil {
+				t.Fatal("LoadFrom() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Errorf("error = %q, want it to mention %s", err, test.want)
+			}
+		})
+	}
+}

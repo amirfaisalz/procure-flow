@@ -19,6 +19,9 @@ type JWTConfig struct {
 	Issuer   string
 	Audience string
 	Leeway   time.Duration
+	// CookieName, when set, makes the authenticator accept the token from that
+	// cookie as well as from the Authorization header. Header credentials win.
+	CookieName string
 }
 
 // JWTAuthenticator verifies HS256 bearer tokens issued by a trusted party.
@@ -46,17 +49,19 @@ type jwtHeader struct {
 type jwtClaims struct {
 	Subject    string   `json:"sub"`
 	Name       string   `json:"name"`
+	Email      string   `json:"email"`
 	Roles      []string `json:"roles"`
 	Department string   `json:"department"`
 	Issuer     string   `json:"iss"`
 	Audience   string   `json:"aud"`
+	IssuedAt   int64    `json:"iat"`
 	ExpiresAt  int64    `json:"exp"`
 	NotBefore  int64    `json:"nbf"`
 }
 
 // Authenticate implements Authenticator.
 func (a *JWTAuthenticator) Authenticate(_ context.Context, r *http.Request) (Principal, error) {
-	token := tokenFromRequest(r)
+	token := tokenFromRequest(r, a.config.CookieName)
 	if token == "" || len(token) > maxTokenLength {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -113,6 +118,7 @@ func (a *JWTAuthenticator) Authenticate(_ context.Context, r *http.Request) (Pri
 	return Principal{
 		Subject:    strings.TrimSpace(claims.Subject),
 		Name:       name,
+		Email:      strings.TrimSpace(claims.Email),
 		Roles:      roles,
 		Department: strings.TrimSpace(claims.Department),
 	}, nil

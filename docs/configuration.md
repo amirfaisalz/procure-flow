@@ -61,6 +61,30 @@ tables below with inline comments.
 | `AUTH_JWT_ISSUER` | `procure-flow` | Required JWT `iss` |
 | `AUTH_JWT_AUDIENCE` | `procure-flow-api` | Required JWT `aud` |
 | `AUTH_JWT_LEEWAY` | `30s` | Clock-skew tolerance |
+| `AUTH_SESSION_TTL` | `8h` | Login session lifetime (1m–720h) |
+| `AUTH_COOKIE_NAME` | `procure_session` | Session cookie name |
+| `AUTH_COOKIE_SECURE` | `true` outside development | `Secure` attribute on the session cookie |
+
+Setting `AUTH_JWT_SECRET` enables `POST /api/v1/auth/login`, which signs the JWT
+with the same key the bearer authenticator verifies. Without it, login and
+logout are not registered and only API keys work; `GET /api/v1/auth/me` still
+describes the caller.
+
+## Seeding
+
+`cmd/seed` (or `make seed`) writes four demo accounts to PostgreSQL and is
+idempotent: the email is the conflict key, so re-running rotates the password
+instead of duplicating rows. It applies pending migrations first.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SEED_PASSWORD` | `demo-password-123` outside production | Password for every demo account (minimum 8 characters) |
+
+`SEED_PASSWORD` is required when `APP_ENV=production`. The accounts are
+`admin@procure.local` (admin), `approver@procure.local` (approver, Engineering),
+`requester@procure.local` (requester, Engineering), and `viewer@procure.local`
+(viewer). Passwords are stored as bcrypt hashes; plaintext never reaches the
+database.
 
 ## Idempotency
 
@@ -120,6 +144,8 @@ precondition is missing:
   `NaN` and `Inf` are rejected rather than silently disabling the limiter.
 - CORS origins must be exact `scheme://host[:port]` values; wildcards are
   rejected.
+- `AUTH_SESSION_TTL` must be between 1m and 720h, and `AUTH_COOKIE_NAME` may
+  only contain letters, digits, dashes, and underscores.
 - `RATE_LIMIT_STORE=redis` requires `REDIS_URL`, and `REDIS_URL` must use the
   `redis://` or `rediss://` scheme.
 - Webhook URLs must use `http://` or `https://`.
@@ -154,7 +180,14 @@ make worker   # second terminal
 ```
 
 This enables PostgreSQL persistence, shared rate limiting, the read cache, and
-the outbox relay plus worker.
+the outbox relay plus worker. To log in, seed the demo accounts first:
+
+```bash
+make seed DATABASE_URL='postgres://procure:procure@127.0.0.1:55432/procure?sslmode=disable'
+curl -s -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@procure.local","password":"demo-password-123"}'
+```
 
 ### Production
 
@@ -165,10 +198,13 @@ export AUTH_ENABLED=true
 export AUTH_JWT_SECRET='at-least-32-characters-long-secret'
 export AUTH_JWT_ISSUER='your-issuer'
 export AUTH_JWT_AUDIENCE='your-audience'
+export AUTH_COOKIE_SECURE=true
 export CORS_ALLOWED_ORIGINS='https://app.example.com'
 export DOCS_ENABLED=false
 ```
 
 Set `DB_AUTO_MIGRATE=false` when migrations are applied by a deployment step
-(the image ships `/migrate` for exactly that). Put a reverse proxy or ingress in
+(the image ships `/migrate` for exactly that). Seed accounts from a deployment
+job with `/seed` and an explicit `SEED_PASSWORD`, or manage accounts in your own
+identity system and keep using bearer tokens. Put a reverse proxy or ingress in
 front of `/metrics`, which is public like the probes.

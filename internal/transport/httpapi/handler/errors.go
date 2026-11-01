@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	authapp "github.com/amirfaisalz/procure-flow/internal/application/auth"
 	"github.com/amirfaisalz/procure-flow/internal/domain"
 	"github.com/amirfaisalz/procure-flow/internal/platform/requestid"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi/response"
@@ -91,6 +92,15 @@ func WriteError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err
 			"INVALID_TRANSITION",
 			"Invalid status transition",
 			"the requested status transition is not allowed",
+		))
+		return
+	case errors.Is(err, authapp.ErrInvalidCredentials):
+		w.Header().Set("WWW-Authenticate", `Bearer realm="procure-flow"`)
+		response.WriteProblem(w, r, response.NewProblem(
+			http.StatusUnauthorized,
+			"INVALID_CREDENTIALS",
+			"Invalid credentials",
+			"the email or password is incorrect",
 		))
 		return
 	case errors.Is(err, domain.ErrConflict):

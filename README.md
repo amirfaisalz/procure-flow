@@ -36,6 +36,9 @@ enough to read in an afternoon, complete enough to deploy.
   concurrent mutations surface as `409 Conflict` instead of overwriting.
 - **Real authorization** — `admin`, `approver`, `requester`, and `viewer`, with
   department-scoped approvals and no self-approval for non-admins.
+- **Password login with cookie sessions** — `POST /api/v1/auth/login` returns the
+  role-bearing JWT as a `Secure`, `HttpOnly`, `SameSite=Lax` cookie; bearer API
+  keys still work for service-to-service calls.
 - **Auditable by construction** — each transition writes an immutable audit row
   in the same transaction; a database trigger rejects `UPDATE` and `DELETE`.
 - **Retry-safe by default** — `Idempotency-Key` replay scoped per actor, RFC 9457
@@ -110,10 +113,21 @@ docker compose -f deployments/docker-compose.yml up --build
 | PostgreSQL | `127.0.0.1:55432` (`procure` / `procure`) |
 | Redis | `127.0.0.1:56379` |
 
-Compose turns authentication on and seeds two **local-only** tokens: an admin
+Compose turns authentication on, seeds four login accounts, and keeps two
+**local-only** bearer tokens for scripts: an admin
 (`local-admin-token-0123456789`) and an Engineering approver
-(`local-approver-token-0123456789`). Replace them before exposing the stack to
-anything.
+(`local-approver-token-0123456789`). Replace all of them before exposing the
+stack to anything.
+
+| Demo account | Role | Department |
+| --- | --- | --- |
+| `admin@procure.local` | `admin` | — |
+| `approver@procure.local` | `approver` | Engineering |
+| `requester@procure.local` | `requester` | Engineering |
+| `viewer@procure.local` | `viewer` | — |
+
+Every demo account uses the password `demo-password-123` unless the seed service
+was given `SEED_PASSWORD`.
 
 ## Walkthrough
 
@@ -126,14 +140,21 @@ draft ──submit──▶ submitted ──approve──▶ approved
   └──cancel───────────┴──cancel──▶ cancelled
 ```
 
-Create a draft, submit it, approve it, then read it back:
+Log in as the seeded requester. The JWT lands in a cookie jar, so it never
+reaches JavaScript:
 
 ```bash
 export API=http://localhost:8080
-export TOKEN=local-admin-token-0123456789
 
-ID=$(curl -s -X POST "$API/api/v1/procurements" \
-  -H "Authorization: Bearer $TOKEN" \
+curl -s -c requester.txt -X POST "$API/api/v1/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"requester@procure.local","password":"demo-password-123"}'
+```
+
+Create a draft, submit it, then read it back:
+
+```bash
+ID=$(curl -s -b requester.txt -X POST "$API/api/v1/procurements" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: demo-create-1' \
   -d '{
@@ -145,19 +166,27 @@ ID=$(curl -s -X POST "$API/api/v1/procurements" \
     "currency": "IDR"
   }' | jq -r '.data.id')
 
-curl -s -X POST "$API/api/v1/procurements/$ID/submit"  -H "Authorization: Bearer $TOKEN"
-curl -s -X POST "$API/api/v1/procurements/$ID/approve" -H "Authorization: Bearer $TOKEN"
-curl -s "$API/api/v1/procurements/$ID" -H "Authorization: Bearer $TOKEN" | jq
+curl -s -b requester.txt -X POST "$API/api/v1/procurements/$ID/submit"
+curl -s -b requester.txt "$API/api/v1/procurements/$ID" | jq
 ```
 
-Without `jq`, copy `data.id` from the create response. Listing, filters, and the
-audit trail work the same way:
+The requester cannot approve their own request, so log in as the approver:
 
 ```bash
-curl -s "$API/api/v1/procurements?status=approved&page=1&page_size=20" \
-  -H "Authorization: Bearer $TOKEN"
+curl -s -c approver.txt -X POST "$API/api/v1/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"approver@procure.local","password":"demo-password-123"}'
 
-curl -s "$API/api/v1/procurements/$ID/audit" -H "Authorization: Bearer $TOKEN"
+curl -s -b approver.txt -X POST "$API/api/v1/procurements/$ID/approve"
+curl -s -b approver.txt "$API/api/v1/procurements/$ID/audit" | jq
+```
+
+Without `jq`, copy `data.id` from the create response. Lists, filters, and the
+audit trail use the same cookie:
+
+```bash
+curl -s -b approver.txt "$API/api/v1/procurements?status=approved&page=1&page_size=20"
+curl -s -b approver.txt "$API/api/v1/auth/me"
 ```
 
 The audit trail is the interesting part: every state change is recorded newest
@@ -210,6 +239,9 @@ go run ./cmd/migrate down
 | `GET` | `/metrics` | Prometheus text format |
 | `GET` | `/docs` | Scalar API reference |
 | `GET` | `/openapi.yaml` | OpenAPI 3.1 contract |
+| `POST` | `/api/v1/auth/login` | Email + password login; sets the session cookie |
+| `POST` | `/api/v1/auth/logout` | Clears the session cookie |
+| `GET` | `/api/v1/auth/me` | Current account, roles, and department |
 | `POST` | `/api/v1/procurements` | Create a draft; accepts `Idempotency-Key` |
 | `GET` | `/api/v1/procurements` | List and filter (`q`, `status`, `page`, `page_size`) |
 | `GET` | `/api/v1/procurements/{id}` | Read one aggregate (cached) |
@@ -248,15 +280,54 @@ and negative cases for VS Code REST Client or JetBrains HTTP Client.
 
 ## Authentication and roles
 
-`/healthz`, `/readyz`, `/metrics`, `/docs`, and `/openapi.yaml` are public.
-Every `/api/v1` route needs a bearer credential — either a static API key or an
-HS256 JWT with a pinned algorithm, valid `exp`/`nbf`, and matching issuer and
-audience.
+`/healthz`, `/readyz`, `/metrics`, `/docs`, `/openapi.yaml`, and the login and
+logout endpoints are public. Every other `/api/v1` route needs either a session
+cookie or a bearer credential.
+
+### Session login
+
+`POST /api/v1/auth/login` exchanges an email and password for the same HS256 JWT
+the bearer authenticator verifies, delivered as a cookie:
+
+```bash
+curl -s -c cookies.txt -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@procure.local","password":"demo-password-123"}'
+```
+
+The cookie is `HttpOnly`, `SameSite=Lax`, scoped to `/api/v1`, and `Secure`
+outside development. The response body carries the account and expiry only —
+never the token. `GET /api/v1/auth/me` echoes the verified claims, and
+`POST /api/v1/auth/logout` clears the cookie.
+
+Accounts live in the `users` table with bcrypt hashes. `make seed` (or the
+compose `seed` service) creates four of them:
+
+| Email | Role | Department |
+| --- | --- | --- |
+| `admin@procure.local` | `admin` | — |
+| `approver@procure.local` | `approver` | Engineering |
+| `requester@procure.local` | `requester` | Engineering |
+| `viewer@procure.local` | `viewer` | — |
+
+The password is `SEED_PASSWORD`, or `demo-password-123` outside production.
+Because the session is a cookie, state-changing requests also rely on
+`SameSite=Lax` plus the required `application/json` content type, which a
+cross-site form cannot send. Logout removes the cookie but does not revoke the
+stateless JWT, so a copied token stays valid until it expires.
+
+### Bearer credentials
+
+Static API keys and externally issued HS256 JWTs keep working for scripts and
+service-to-service calls. JWTs must carry `sub`, `exp`, a valid `roles` claim,
+and match the configured issuer and audience:
 
 ```bash
 curl -s http://localhost:8080/api/v1/procurements \
   -H 'Authorization: Bearer local-admin-token-0123456789'
 ```
+
+When both a cookie and an `Authorization` header are present, the header wins.
 
 | Role | Permissions |
 | --- | --- |
@@ -309,7 +380,10 @@ Environment variables only; `.env` is not read automatically. The essentials:
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `DATABASE_URL` | *(empty)* | Empty selects the in-memory repository |
 | `AUTH_ENABLED` | platform-dependent | `true` in staging/production |
-| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | One of them is required in production |
+| `AUTH_API_KEYS` / `AUTH_JWT_SECRET` | *(empty)* | One is required in production; the secret enables login |
+| `AUTH_SESSION_TTL` | `8h` | Login cookie lifetime |
+| `AUTH_COOKIE_SECURE` | `true` outside development | Keep `true` behind TLS |
+| `SEED_PASSWORD` | demo default outside production | Password for seeded accounts |
 | `CORS_ALLOWED_ORIGINS` | *(empty)* | Exact origins only; wildcards rejected |
 | `REDIS_URL` | *(empty)* | Enables shared rate limiting and the read cache |
 | `RABBITMQ_URL` | *(empty)* | Enables the outbox relay and lifecycle events |
@@ -400,9 +474,9 @@ docker run --rm -p 8080:8080 \
   procure-flow:local
 ```
 
-The image ships three binaries: `/api` (default entrypoint), `/worker`, and
-`/migrate` for deployment jobs. Compose runs it read-only with
-`no-new-privileges` and a 30s grace period.
+The image ships four binaries: `/api` (default entrypoint), `/worker`,
+`/migrate` for deployment jobs, and `/seed` for demo or bootstrap accounts.
+Compose runs it read-only with `no-new-privileges` and a 30s grace period.
 
 ## Development
 
@@ -425,6 +499,7 @@ make cover             # coverage summary
 | `make deps-up` / `make db-up` | Start dependencies |
 | `make db-reset` | Destroy and recreate the database volume |
 | `make migrate-up` / `make migrate-status` | Migration CLI wrappers |
+| `make seed` | Create the demo login accounts (`DATABASE_URL=…`) |
 | `make smoke` | Smoke-test a running instance (`BASE_URL=…`) |
 | `make build` | Binary in `bin/` |
 
@@ -443,6 +518,7 @@ Redis, and RabbitMQ services, a build, and a container build.
 cmd/api/                       HTTP entrypoint and outbox relay
 cmd/worker/                    async notification and ERP consumers
 cmd/migrate/                   migration CLI (up, down, status)
+cmd/seed/                      demo account seeder
 internal/config/               environment configuration
 internal/domain/               domain errors, procurement aggregate, ports
 internal/application/          use cases, cache port, event emission

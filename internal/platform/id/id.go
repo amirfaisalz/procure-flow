@@ -23,6 +23,11 @@ func (Generator) NewID() string {
 	return "prc_" + randomHex(16)
 }
 
+// NewUserID returns an account identifier such as usr_9f2c... .
+func (Generator) NewUserID() string {
+	return "usr_" + randomHex(16)
+}
+
 // NewNumber returns a request number such as PR-202610-A1B2C3D4E5F60718.
 // The suffix carries 64 bits of entropy so collisions stay negligible even at
 // high monthly volumes. The database additionally enforces uniqueness.

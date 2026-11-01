@@ -347,3 +347,32 @@ func TestRouterAuditPagination(t *testing.T) {
 		t.Errorf("invalid page status = %d, want 400", invalid.Code)
 	}
 }
+
+func TestSessionEndpointsDisabledWithoutSigningKey(t *testing.T) {
+	router := buildAuthenticatedRouter(t, memory.NewProcurementRepository(), memory.NewAuditRepository(),
+		func(deps *httpapi.Dependencies) {
+			deps.Auth = handler.NewAuth(nil, handler.AuthConfig{CookieName: sessionCookie}, nil)
+		})
+
+	// /me describes any authenticated caller, including API-key clients.
+	rec := doRequestWithHeaders(router, http.MethodGet, "/api/v1/auth/me", "", "", bearer(adminToken))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var me struct {
+		Data sessionUserBody `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &me); err != nil {
+		t.Fatalf("decode me: %v", err)
+	}
+	if me.Data.ID != "user_admin" {
+		t.Errorf("me id = %q, want user_admin", me.Data.ID)
+	}
+
+	// Login is not registered without a signing key.
+	login := doRequestWithHeaders(router, http.MethodPost, "/api/v1/auth/login",
+		`{"email":"admin@procure.local","password":"whatever"}`, "application/json", bearer(adminToken))
+	if login.Code != http.StatusNotFound {
+		t.Errorf("login status = %d, want 404 when sessions are disabled", login.Code)
+	}
+}

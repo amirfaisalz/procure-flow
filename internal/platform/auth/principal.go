@@ -53,6 +53,7 @@ func ParseRoles(raw []string) ([]Role, error) {
 type Principal struct {
 	Subject    string
 	Name       string
+	Email      string
 	Roles      []Role
 	Department string
 }

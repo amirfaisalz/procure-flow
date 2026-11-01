@@ -25,12 +25,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-s -w" \
     -o /out/migrate \
     ./cmd/migrate
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/seed \
+    ./cmd/seed
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/api /api
 COPY --from=build /out/worker /worker
 COPY --from=build /out/migrate /migrate
+COPY --from=build /out/seed /seed
 
 USER nonroot:nonroot
 EXPOSE 8080

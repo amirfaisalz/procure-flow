@@ -42,6 +42,29 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  seed:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+    image: procure-flow:local
+    entrypoint: ["/seed"]
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: info
+      DATABASE_URL: "postgres://procure:procure@db:5432/procure?sslmode=disable"
+      # Local-only demo password for the seeded accounts. Replace it anywhere
+      # that is not a developer machine.
+      SEED_PASSWORD: "demo-password-123"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+
   api:
     build:
       context: ..
@@ -63,6 +86,14 @@ services:
       AUTH_ENABLED: "true"
       # Local-only credentials. Replace these before exposing the stack.
       AUTH_API_KEYS: '[{"token":"local-admin-token-0123456789","subject":"user_admin","name":"Local Admin","roles":["admin"]},{"token":"local-approver-token-0123456789","subject":"user_fin","name":"Finance Approver","roles":["approver"],"department":"Engineering"}]'
+      # Session login: the JWT is delivered in an HttpOnly cookie. The secret is
+      # local-only; replace it before exposing the stack to a network.
+      AUTH_JWT_SECRET: "local-compose-jwt-secret-change-me-0123456789"
+      AUTH_SESSION_TTL: "8h"
+      AUTH_COOKIE_NAME: "procure_session"
+      # Local compose runs on plain http://localhost. Real deployments must
+      # keep AUTH_COOKIE_SECURE=true and terminate TLS in front of the API.
+      AUTH_COOKIE_SECURE: "false"
       IDEMPOTENCY_ENABLED: "true"
       IDEMPOTENCY_TTL: "24h"
       RATE_LIMIT_ENABLED: "true"
@@ -85,6 +116,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      seed:
+        condition: service_completed_successfully
     # Longer than HTTP_SHUTDOWN_TIMEOUT so in-flight work can drain.
     stop_grace_period: 30s
     read_only: true

@@ -13,12 +13,14 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	authapp "github.com/amirfaisalz/procure-flow/internal/application/auth"
 	app "github.com/amirfaisalz/procure-flow/internal/application/procurement"
 	"github.com/amirfaisalz/procure-flow/internal/config"
 	"github.com/amirfaisalz/procure-flow/internal/domain/audit"
 	"github.com/amirfaisalz/procure-flow/internal/domain/idempotency"
 	"github.com/amirfaisalz/procure-flow/internal/domain/outbox"
 	domainproc "github.com/amirfaisalz/procure-flow/internal/domain/procurement"
+	"github.com/amirfaisalz/procure-flow/internal/domain/user"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/memory"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/postgres"
 	"github.com/amirfaisalz/procure-flow/internal/infrastructure/rabbitmq"
@@ -27,6 +29,7 @@ import (
 	"github.com/amirfaisalz/procure-flow/internal/platform/id"
 	"github.com/amirfaisalz/procure-flow/internal/platform/logging"
 	"github.com/amirfaisalz/procure-flow/internal/platform/metrics"
+	"github.com/amirfaisalz/procure-flow/internal/platform/password"
 	"github.com/amirfaisalz/procure-flow/internal/platform/ratelimit"
 	"github.com/amirfaisalz/procure-flow/internal/platform/relay"
 	"github.com/amirfaisalz/procure-flow/internal/transport/httpapi"
@@ -131,6 +134,36 @@ func run() error {
 		logger.Warn("authentication disabled; all requests act as a local admin")
 	}
 
+	// Session login needs a signing key. Without one the API keeps accepting
+	// bearer credentials only; /me stays available, login and logout do not.
+	var authHandler *handler.Auth
+	if cfg.Auth.Enabled {
+		var loginService *authapp.Service
+		if cfg.Auth.JWTSecret != "" {
+			hasher := password.NewDefault()
+			issuer := auth.NewJWTIssuer([]byte(cfg.Auth.JWTSecret), cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience)
+			loginService = authapp.NewService(store.users, hasher, issuer, cfg.Auth.SessionTTL)
+		}
+
+		authHandler = handler.NewAuth(loginService, handler.AuthConfig{
+			CookieName:   cfg.Auth.CookieName,
+			CookieSecure: cfg.Auth.CookieSecure,
+		}, logger)
+
+		if loginService != nil {
+			logger.Info("session login enabled",
+				slog.String("cookie", cfg.Auth.CookieName),
+				slog.Bool("secure_cookie", cfg.Auth.CookieSecure),
+				slog.Duration("session_ttl", cfg.Auth.SessionTTL),
+			)
+			if !cfg.Auth.CookieSecure && cfg.Env != config.EnvDevelopment {
+				logger.Warn("session cookie is not marked Secure; terminate TLS and set AUTH_COOKIE_SECURE=true")
+			}
+		} else {
+			logger.Info("session login disabled; set AUTH_JWT_SECRET to enable it")
+		}
+	}
+
 	registry := metrics.NewRegistry()
 	limiter := newLimiter(cfg, redisClient, logger)
 
@@ -140,6 +173,7 @@ func run() error {
 		Procurement:   service,
 		Health:        health,
 		Authenticator: authenticator,
+		Auth:          authHandler,
 		Idempotency:   store.idempotency,
 		RateLimiter:   limiter,
 		Metrics:       registry,
@@ -228,6 +262,7 @@ func newLimiter(cfg config.Config, client *goredis.Client, logger *slog.Logger) 
 // storage bundles the adapters selected at startup.
 type storage struct {
 	procurements domainproc.Repository
+	users        user.Repository
 	audit        audit.Repository
 	idempotency  idempotency.Repository
 	outbox       outbox.Repository
@@ -245,6 +280,7 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 		logger.Warn("using in-memory repository; data will not survive a restart")
 		return storage{
 			procurements: repo,
+			users:        memory.NewUserRepository(),
 			audit:        memory.NewAuditRepository(),
 			idempotency:  memory.NewIdempotencyRepository(),
 			outbox:       memory.NewOutboxRepository(),
@@ -282,6 +318,7 @@ func openStorage(cfg config.Config, logger *slog.Logger) (storage, error) {
 	logger.Info("using postgres repository")
 	return storage{
 		procurements: postgres.NewProcurementRepository(db),
+		users:        postgres.NewUserRepository(db),
 		audit:        postgres.NewAuditRepository(db),
 		idempotency:  postgres.NewIdempotencyRepository(db),
 		outbox:       postgres.NewOutboxRepository(db),
@@ -314,10 +351,11 @@ func newAuthenticator(cfg config.Auth) auth.Authenticator {
 
 	if cfg.JWTSecret != "" {
 		chain = append(chain, auth.NewJWTAuthenticator(auth.JWTConfig{
-			Secret:   []byte(cfg.JWTSecret),
-			Issuer:   cfg.JWTIssuer,
-			Audience: cfg.JWTAudience,
-			Leeway:   cfg.JWTLeeway,
+			Secret:     []byte(cfg.JWTSecret),
+			Issuer:     cfg.JWTIssuer,
+			Audience:   cfg.JWTAudience,
+			Leeway:     cfg.JWTLeeway,
+			CookieName: cfg.CookieName,
 		}))
 	}
 

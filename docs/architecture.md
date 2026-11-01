@@ -16,15 +16,18 @@
 cmd/api                                HTTP entrypoint + outbox relay
 cmd/worker                             asynchronous consumer entrypoint
 cmd/migrate                            migration CLI
+cmd/seed                               demo account seeder
   └─ internal/transport/httpapi        (HTTP adapter)
        ├─ handler                      request/response mapping
        ├─ middleware                   cross-cutting concerns
        └─ response                     JSON + RFC 9457 helpers
   └─ internal/application/procurement  (use cases, cache port, event emission)
+  └─ internal/application/auth         (login, session issuance)
   └─ internal/domain/procurement       (aggregate + repository port)
   └─ internal/domain/audit             (append-only audit port)
   └─ internal/domain/event             (event envelope)
   └─ internal/domain/outbox            (transactional outbox port)
+  └─ internal/domain/user              (account aggregate + repository port)
        └─ internal/infrastructure/memory   (local adapters)
        └─ internal/infrastructure/postgres (production adapters)
        └─ internal/infrastructure/redis   (limiter client + JSON cache)
@@ -107,8 +110,22 @@ audit events atomically without leaking SQL into the application layer.
 
 The HTTP authentication middleware runs only for `/api/v1/*`. It maps the
 principal to an application `Actor` and stores it in the request context.
-Health probes and API documentation bypass it. When `AUTH_ENABLED=false`, the
-router injects a local admin actor instead.
+Health probes, API documentation, and login/logout bypass it. When
+`AUTH_ENABLED=false`, the router injects a local admin actor instead.
+
+Password login adds a second credential source that converges on the same
+`Principal`. `application/auth.Service` loads the account from the `users` table,
+verifies the bcrypt hash, and asks `platform/auth.JWTIssuer` for an HS256 token
+whose claims include `roles` and `department`. The login handler writes that
+token to an `HttpOnly` cookie; `JWTAuthenticator` accepts it from either the
+`Authorization` header or the cookie, so authorization code cannot tell how the
+caller signed in. Unknown emails still run a decoy bcrypt comparison so they
+cannot be enumerated by timing.
+
+The cookie is scoped to `/api/v1`, marked `Secure` outside development, and uses
+`SameSite=Lax`. State-changing endpoints require `application/json`, which a
+cross-site HTML form cannot produce, so the session cookie is not usable for
+CSRF.
 
 The application policy fails closed: no actor means `domain.ErrForbidden`.
 

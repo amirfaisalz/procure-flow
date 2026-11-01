@@ -19,6 +19,7 @@ const (
 type Actor struct {
 	Subject    string
 	Name       string
+	Email      string
 	Roles      []string
 	Department string
 }

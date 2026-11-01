@@ -11,8 +11,9 @@
 @contentType = application/json
 
 # Authentication is disabled in development by default, so these requests work
-# without credentials. When AUTH_ENABLED=true, add an Authorization header to
-# every /api/v1 request:
+# without credentials. When AUTH_ENABLED=true, run the login request below: the
+# REST Client keeps the HttpOnly session cookie and sends it automatically.
+# Bearer credentials still work; add this header to any /api/v1 request:
 #   Authorization: Bearer <token>
 # The local compose stack ships with `local-admin-token-0123456789`.
 @token = local-admin-token-0123456789
@@ -28,6 +29,24 @@ GET {{baseUrl}}/openapi.yaml
 
 ### Metrics (Prometheus text format)
 GET {{baseUrl}}/metrics
+
+### Log in (sets the session cookie)
+# Demo accounts come from `make seed` or the compose seed service. REST Client
+# stores the cookie and reuses it for the requests below.
+# @name login
+POST {{baseUrl}}/api/v1/auth/login
+Content-Type: {{contentType}}
+
+{
+  "email": "admin@procure.local",
+  "password": "demo-password-123"
+}
+
+### Current session
+GET {{baseUrl}}/api/v1/auth/me
+
+### Log out (clears the session cookie)
+POST {{baseUrl}}/api/v1/auth/logout
 
 ### Create procurement
 # @name create

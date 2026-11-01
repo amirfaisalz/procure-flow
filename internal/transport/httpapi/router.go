@@ -21,6 +21,7 @@ type Dependencies struct {
 	Procurement   *app.Service
 	Health        *handler.Health
 	Authenticator auth.Authenticator
+	Auth          *handler.Auth
 	Idempotency   idempotency.Repository
 	RateLimiter   ratelimit.Limiter
 	Metrics       *metrics.Registry
@@ -38,9 +39,11 @@ var localActor = app.Actor{
 // deadline covers the whole chain, a request ID and trace context exist before
 // logging, and panics are recovered before metrics record the final status.
 //
-// Health probes, API documentation, and metrics stay public; every /api/v1
-// route is authenticated. When authentication is disabled the router injects a
-// local admin actor, mirroring the behaviour of the in-memory repository.
+// Health probes, API documentation, and metrics stay public, as do the login
+// and logout endpoints: a client must be able to recover from an expired
+// session. Every other /api/v1 route is authenticated. When authentication is
+// disabled the router injects a local admin actor, mirroring the behaviour of
+// the in-memory repository.
 func NewRouter(deps Dependencies) http.Handler {
 	logger := deps.Logger
 	if logger == nil {
@@ -69,6 +72,15 @@ func NewRouter(deps Dependencies) http.Handler {
 	apiMux.HandleFunc("POST /api/v1/procurements/{id}/approve", procurementHandler.Approve)
 	apiMux.HandleFunc("POST /api/v1/procurements/{id}/reject", procurementHandler.Reject)
 	apiMux.HandleFunc("POST /api/v1/procurements/{id}/cancel", procurementHandler.Cancel)
+
+	var loginHandler, logoutHandler http.Handler
+	if deps.Auth != nil {
+		apiMux.HandleFunc("GET /api/v1/auth/me", deps.Auth.Me)
+		if deps.Auth.SessionEnabled() {
+			loginHandler = http.HandlerFunc(deps.Auth.Login)
+			logoutHandler = http.HandlerFunc(deps.Auth.Logout)
+		}
+	}
 
 	var apiHandler http.Handler = &fallback{mux: apiMux}
 
@@ -101,6 +113,15 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /healthz", deps.Health.Live)
 	mux.HandleFunc("GET /readyz", deps.Health.Ready)
 	mux.Handle("/api/v1/", apiHandler)
+
+	if loginHandler != nil {
+		if rateLimiting {
+			loginHandler = middleware.RateLimit(deps.RateLimiter, logger)(loginHandler)
+			logoutHandler = middleware.RateLimit(deps.RateLimiter, logger)(logoutHandler)
+		}
+		mux.Handle("POST /api/v1/auth/login", loginHandler)
+		mux.Handle("POST /api/v1/auth/logout", logoutHandler)
+	}
 
 	if deps.Config.Metrics.Enabled {
 		mux.Handle("GET /metrics", handler.NewMetrics(deps.Metrics))

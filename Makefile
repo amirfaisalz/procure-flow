@@ -98,6 +98,11 @@ migrate-status: ## Show migration status (DATABASE_URL=...)
 	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required" && exit 1)
 	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate status
 
+.PHONY: seed
+seed: ## Seed demo login accounts (DATABASE_URL=...; SEED_PASSWORD=...)
+	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is required" && exit 1)
+	DATABASE_URL="$(DATABASE_URL)" SEED_PASSWORD="$(SEED_PASSWORD)" APP_ENV="$(APP_ENV)" go run ./cmd/seed
+
 .PHONY: docker-build
 docker-build: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .

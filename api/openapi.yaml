@@ -14,12 +14,19 @@ info:
     Lifecycle changes also publish asynchronous events (requester notifications
     and ERP syncs) through a transactional outbox. Those side effects happen in
     a separate worker and never delay the HTTP response.
+
+    `POST /api/v1/auth/login` exchanges an email and password for a signed JWT
+    delivered as an `HttpOnly` session cookie; `GET /api/v1/auth/me` reports the
+    current account. Static API keys and bearer JWTs keep working for
+    service-to-service calls.
 servers:
   - url: http://localhost:8080
 security:
   - bearerAuth: []
+  - cookieAuth: []
 tags:
   - name: Health
+  - name: Auth
   - name: Procurements
   - name: Documentation
 paths:
@@ -69,6 +76,89 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/Readiness"
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in and start a session
+      description: |
+        Verifies the account password and sets the signed JWT as an `HttpOnly`
+        session cookie. The token is deliberately not returned in the response
+        body, so client-side scripts cannot read it.
+
+        The cookie is `Secure` outside development and uses `SameSite=Lax`.
+        Mutating API calls also require `application/json`, which blocks
+        cross-site form submissions.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated; the session cookie is set
+          headers:
+            Set-Cookie:
+              description: Session JWT cookie (HttpOnly, Secure outside development)
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "401":
+          description: The email or password is incorrect
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: End the session
+      description: |
+        Clears the session cookie. The JWT is stateless, so it stays valid until
+        it expires; logout removes it from the browser.
+      operationId: logout
+      security: []
+      responses:
+        "204":
+          description: Cookie cleared
+          headers:
+            Set-Cookie:
+              description: Expired session cookie
+              schema: { type: string }
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Describe the current session
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: The authenticated caller derived from the token claims
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SessionUser"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /api/v1/procurements:
     get:
       tags: [Procurements]
@@ -397,6 +487,15 @@ components:
         Send either a static API key or an HS256 JWT as `Authorization: Bearer <token>`.
         API keys are configured with `AUTH_API_KEYS`; JWTs are verified with
         `AUTH_JWT_SECRET`, `AUTH_JWT_ISSUER`, and `AUTH_JWT_AUDIENCE`.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: procure_session
+      description: |
+        Session cookie set by `POST /api/v1/auth/login`. It carries the same
+        signed HS256 JWT as a bearer token, including the account roles and
+        department. When both a cookie and an Authorization header are present,
+        the header wins.
   parameters:
     ProcurementID:
       name: id
@@ -445,6 +544,48 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
   schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: admin@procure.local
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 72
+    SessionUser:
+      type: object
+      required: [id, email, name, roles]
+      properties:
+        id:
+          type: string
+          example: usr_284a13a45dafc8a58a0e32cbbb7f2d43
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [admin, approver, requester, viewer]
+        department:
+          type: string
+    Session:
+      type: object
+      required: [user, expires_at]
+      properties:
+        user:
+          $ref: "#/components/schemas/SessionUser"
+        expires_at:
+          type: string
+          format: date-time
     Status:
       type: string
       enum: [draft, submitted, approved, rejected, cancelled]

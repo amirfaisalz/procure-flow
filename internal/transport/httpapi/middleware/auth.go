@@ -81,6 +81,7 @@ func ActorFromPrincipal(principal auth.Principal) app.Actor {
 	return app.Actor{
 		Subject:    principal.Subject,
 		Name:       principal.Name,
+		Email:      principal.Email,
 		Roles:      roles,
 		Department: principal.Department,
 	}
@@ -93,7 +94,7 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, logger *slog.Logger,
 			http.StatusUnauthorized,
 			"UNAUTHENTICATED",
 			"Authentication required",
-			"provide a valid bearer token",
+			"provide a valid session cookie or bearer token",
 		))
 		return
 	}

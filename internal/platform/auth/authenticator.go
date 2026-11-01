@@ -54,7 +54,7 @@ func NewAPIKeyAuthenticator(keys []APIKey) *APIKeyAuthenticator {
 
 // Authenticate implements Authenticator.
 func (a *APIKeyAuthenticator) Authenticate(_ context.Context, r *http.Request) (Principal, error) {
-	token := tokenFromRequest(r)
+	token := tokenFromRequest(r, "")
 	if token == "" {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -67,7 +67,11 @@ func (a *APIKeyAuthenticator) Authenticate(_ context.Context, r *http.Request) (
 	return Principal{}, ErrUnauthenticated
 }
 
-func tokenFromRequest(r *http.Request) string {
+// tokenFromRequest extracts a credential from the Authorization header, the
+// X-API-Key header, or (when cookieName is set) a session cookie. An
+// Authorization header that is present but malformed wins over the cookie, so
+// an explicit bad credential never silently falls back to another one.
+func tokenFromRequest(r *http.Request, cookieName string) string {
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
 		const prefix = "bearer "
 		if len(header) > len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {
@@ -75,5 +79,13 @@ func tokenFromRequest(r *http.Request) string {
 		}
 		return ""
 	}
-	return strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if key := strings.TrimSpace(r.Header.Get("X-API-Key")); key != "" {
+		return key
+	}
+	if cookieName != "" {
+		if cookie, err := r.Cookie(cookieName); err == nil {
+			return strings.TrimSpace(cookie.Value)
+		}
+	}
+	return ""
 }

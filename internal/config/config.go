@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -98,12 +99,15 @@ type Metrics struct {
 
 // Auth controls request authentication and role-based authorization.
 type Auth struct {
-	Enabled     bool
-	JWTSecret   string
-	JWTIssuer   string
-	JWTAudience string
-	JWTLeeway   time.Duration
-	APIKeys     []APIKey
+	Enabled      bool
+	JWTSecret    string
+	JWTIssuer    string
+	JWTAudience  string
+	JWTLeeway    time.Duration
+	SessionTTL   time.Duration
+	CookieName   string
+	CookieSecure bool
+	APIKeys      []APIKey
 }
 
 // APIKey is a static bearer token bound to a principal.
@@ -288,6 +292,9 @@ func loadFrom(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
+// validCookieName keeps the session cookie name safe to place in a header.
+var validCookieName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 func (c Config) validateServer() error {
 	if c.HTTP.RequestTimeout > c.HTTP.WriteTimeout {
 		return fmt.Errorf("HTTP_REQUEST_TIMEOUT: must be less than or equal to HTTP_WRITE_TIMEOUT")
@@ -310,6 +317,12 @@ func (c Config) validateServer() error {
 		}
 		if len(c.Auth.APIKeys) == 0 && c.Auth.JWTSecret == "" {
 			return fmt.Errorf("AUTH_API_KEYS or AUTH_JWT_SECRET: at least one credential source is required when auth is enabled")
+		}
+		if c.Auth.SessionTTL < time.Minute || c.Auth.SessionTTL > 30*24*time.Hour {
+			return fmt.Errorf("AUTH_SESSION_TTL: must be between 1m and 720h")
+		}
+		if !validCookieName.MatchString(c.Auth.CookieName) {
+			return fmt.Errorf("AUTH_COOKIE_NAME: must contain only letters, digits, dashes, and underscores")
 		}
 	}
 	return nil
@@ -635,11 +648,14 @@ func loadAuth(getenv func(string) string, env Env) (Auth, error) {
 	}
 
 	cfg := Auth{
-		Enabled:     enabled,
-		JWTSecret:   strings.TrimSpace(getenv("AUTH_JWT_SECRET")),
-		JWTIssuer:   strings.TrimSpace(getenv("AUTH_JWT_ISSUER")),
-		JWTAudience: strings.TrimSpace(getenv("AUTH_JWT_AUDIENCE")),
-		JWTLeeway:   30 * time.Second,
+		Enabled:      enabled,
+		JWTSecret:    strings.TrimSpace(getenv("AUTH_JWT_SECRET")),
+		JWTIssuer:    strings.TrimSpace(getenv("AUTH_JWT_ISSUER")),
+		JWTAudience:  strings.TrimSpace(getenv("AUTH_JWT_AUDIENCE")),
+		JWTLeeway:    30 * time.Second,
+		SessionTTL:   8 * time.Hour,
+		CookieName:   "procure_session",
+		CookieSecure: env != EnvDevelopment,
 	}
 	if cfg.JWTIssuer == "" {
 		cfg.JWTIssuer = "procure-flow"
@@ -648,6 +664,15 @@ func loadAuth(getenv func(string) string, env Env) (Auth, error) {
 		cfg.JWTAudience = "procure-flow-api"
 	}
 	if cfg.JWTLeeway, err = durationEnv(getenv, "AUTH_JWT_LEEWAY", cfg.JWTLeeway); err != nil {
+		return Auth{}, err
+	}
+	if cfg.SessionTTL, err = durationEnv(getenv, "AUTH_SESSION_TTL", cfg.SessionTTL); err != nil {
+		return Auth{}, err
+	}
+	if name := strings.TrimSpace(getenv("AUTH_COOKIE_NAME")); name != "" {
+		cfg.CookieName = name
+	}
+	if cfg.CookieSecure, err = boolEnv(getenv, "AUTH_COOKIE_SECURE", cfg.CookieSecure); err != nil {
 		return Auth{}, err
 	}
 
